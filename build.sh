@@ -54,6 +54,8 @@ if [ "$INIT" -eq 1 ]; then
     fi
   else
     SLUG=${REPOPREF}${IN_REPO}
+    touch ./${IN_REPO}.go
+    mkdir -p pkg/
   fi
   
   SPDX="${IN_SPDX}"
@@ -85,6 +87,7 @@ YEAR=$(copyyear "${COPYYEAR}")
 } > ./NOTICE
 
 sed -i -e "s|${REPOSLUG}|${SLUG}|g" ./Dockerfile
+sed -i -e "s|${REPOSLUG}|${SLUG}|g" ./go.mod
 
 if [ "$INIT" -eq 0 ]; then
   docker rmi "${REPOSLUG}" 2>/dev/null || true
