@@ -1,0 +1,25 @@
+[
+  {
+    "name": "relative require",
+    "method": "GET",
+    "path": "/module/relative",
+    "wantStatus": 200,
+    "wantContentType": "text/plain",
+    "wantBodyEquals": "hello world"
+  },
+  {
+    "name": "node_modules require",
+    "method": "GET",
+    "path": "/module/node-modules",
+    "wantStatus": 200,
+    "wantBodyEquals": "07"
+  },
+  {
+    "name": "json require",
+    "method": "GET",
+    "path": "/module/json",
+    "wantStatus": 200,
+    "wantContentType": "application/json",
+    "wantBodyContains": "\"name\":\"e2e-app\""
+  }
+]

@@ -42,6 +42,44 @@
     "wantHeaders": { "X-Head": "yes" }
   },
   {
+    "name": "express.Router() registers routes relative to its mount",
+    "method": "GET",
+    "path": "/api/hello",
+    "wantStatus": 200,
+    "wantBodyEquals": "router hello"
+  },
+  {
+    "name": "mounted router captures params",
+    "method": "GET",
+    "path": "/api/user/9",
+    "wantStatus": 200,
+    "wantContentType": "application/json",
+    "wantBodyEquals": "{\"id\":\"9\"}"
+  },
+  {
+    "name": "express.static serves a file",
+    "method": "GET",
+    "path": "/static/hello.txt",
+    "wantStatus": 200,
+    "wantContentType": "text/plain",
+    "wantBodyContains": "static hello"
+  },
+  {
+    "name": "express.static serves a directory index",
+    "method": "GET",
+    "path": "/static/",
+    "wantStatus": 200,
+    "wantContentType": "text/html",
+    "wantBodyContains": "static index"
+  },
+  {
+    "name": "express.static misses fall through",
+    "method": "GET",
+    "path": "/static/missing.txt",
+    "wantStatus": 404,
+    "wantBodyContains": "not found"
+  },
+  {
     "name": "mounted middleware runs before the route",
     "method": "GET",
     "path": "/mw/hello",

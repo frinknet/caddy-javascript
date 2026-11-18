@@ -1,3 +1,7 @@
+const greet = require('./lib/greet')
+const leftpad = require('leftpad')
+const data = require('./data.json')
+
 app.get('/', (req, res) => {
   res.json({ ok: true, path: req.path, method: req.method })
 })
@@ -67,6 +71,58 @@ app.get('/fetch-blocked', (req, res) => {
   })
 })
 
+app.get('/fetch/promise', (req, res) => {
+  fetch('http://' + req.host + '/hello')
+    .then((upstream) => upstream.text())
+    .then((text) => res.json({ status: 200, text }))
+    .catch((err) => res.status(502).send(err.message))
+})
+
+app.get('/fetch/headers', (req, res) => {
+  fetch('http://' + req.host + '/header')
+    .then((upstream) => res.json({
+      status: upstream.status,
+      ok: upstream.ok,
+      custom: upstream.headers.get('X-Custom')
+    }))
+    .catch((err) => res.status(502).send(err.message))
+})
+
+app.get('/fetch/post', (req, res) => {
+  fetch('http://' + req.host + '/echo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ a: 1 })
+  })
+    .then((upstream) => upstream.json())
+    .then((echoed) => res.json({ status: 201, echoed }))
+    .catch((err) => res.status(502).send(err.message))
+})
+
+app.get('/fetch/stream', (req, res) => {
+  fetch('http://' + req.host + '/hello')
+    .then((upstream) => {
+      const reader = upstream.body.getReader()
+      let out = ''
+      function pump() {
+        return reader.read().then((step) => {
+          if (step.done) return out
+          out += step.value
+          return pump()
+        })
+      }
+      return pump()
+    })
+    .then((text) => res.send(text))
+    .catch((err) => res.status(502).send(err.message))
+})
+
+app.get('/fetch/reject', (req, res) => {
+  fetch('http://example.com/')
+    .then(() => res.send('allowed'))
+    .catch((err) => res.status(502).send(err.message))
+})
+
 const express = require('express')
 const api = express()
 
@@ -78,6 +134,13 @@ api.head('/express/head', (req, res) => {
   res.set('X-Head', 'yes').send('')
 })
 api.listen(3000)
+
+const router = express.Router()
+router.get('/hello', (req, res) => res.send('router hello'))
+router.get('/user/:id', (req, res) => res.json({ id: req.params.id }))
+app.use('/api', router)
+
+app.use('/static', express.static('public'))
 
 app.use('/mw', (req, res, next) => {
   res.set('X-MW', 'yes')
@@ -107,6 +170,10 @@ app.use('/boom', (err, req, res, next) => {
 app.get('/throw', (req, res) => {
   throw new Error('nope')
 })
+
+app.get('/module/relative', (req, res) => res.send(greet('world')))
+app.get('/module/node-modules', (req, res) => res.send(leftpad('7')))
+app.get('/module/json', (req, res) => res.json(data))
 
 app.use((req, res) => {
   res.status(404).send('not found')

@@ -143,3 +143,96 @@ func TestNoLayersMatchesNothing(t *testing.T) {
 		t.Fatalf("empty table matched %d layers", len(got))
 	}
 }
+
+func TestMountExpandsRelativeRoutes(t *testing.T) {
+	rt := sobek.New()
+	root := New()
+	sub := New()
+	sub.Add("GET", "/users/:id", fn(rt, "return 1"), 2)
+	root.Mount("/api", sub)
+
+	layers, params := root.Match("GET", "/api/users/7")
+	if len(layers) != 1 {
+		t.Fatalf("matched %d layers, want 1", len(layers))
+	}
+	if params["id"] != "7" {
+		t.Fatalf("id = %q, want 7", params["id"])
+	}
+	if got, _ := root.Match("GET", "/other/users/7"); len(got) != 0 {
+		t.Fatalf("outside the mount matched %d layers, want 0", len(got))
+	}
+}
+
+func TestMountSeesRoutesAddedLater(t *testing.T) {
+	rt := sobek.New()
+	root := New()
+	sub := New()
+	root.Mount("/api", sub)
+	sub.Add("GET", "/late", fn(rt, "return 1"), 2)
+
+	if got, _ := root.Match("GET", "/api/late"); len(got) != 1 {
+		t.Fatalf("late route matched %d layers, want 1", len(got))
+	}
+}
+
+func TestNestedMounts(t *testing.T) {
+	rt := sobek.New()
+	root := New()
+	mid := New()
+	inner := New()
+	inner.Add("GET", "/x", fn(rt, "return 1"), 2)
+	mid.Mount("/v1", inner)
+	root.Mount("/api", mid)
+
+	if got, _ := root.Match("GET", "/api/v1/x"); len(got) != 1 {
+		t.Fatalf("nested route matched %d layers, want 1", len(got))
+	}
+	if got, _ := root.Match("GET", "/api/x"); len(got) != 0 {
+		t.Fatalf("missing mount segment matched %d layers, want 0", len(got))
+	}
+}
+
+func TestMountParamsMergeWithInnerParams(t *testing.T) {
+	rt := sobek.New()
+	root := New()
+	sub := New()
+	sub.Add("GET", "/posts/:post", fn(rt, "return 1"), 2)
+	root.Mount("/user/:id", sub)
+
+	_, params := root.Match("GET", "/user/7/posts/9")
+	want := map[string]string{"id": "7", "post": "9"}
+	if !reflect.DeepEqual(params, want) {
+		t.Fatalf("params = %v, want %v", params, want)
+	}
+}
+
+func TestStaticLayerRelativeToMounts(t *testing.T) {
+	root := New()
+	sub := New()
+	sub.UseStatic("/static", &Static{Root: "public"})
+	root.Mount("/api/:space", sub)
+
+	layers, params := root.Match("GET", "/api/acme/static/app.js")
+	if len(layers) != 1 {
+		t.Fatalf("matched %d layers, want 1", len(layers))
+	}
+	if params["space"] != "acme" {
+		t.Fatalf("space = %q, want acme", params["space"])
+	}
+	rest, ok := layers[0].Relative("/api/acme/static/app.js")
+	if !ok || rest != "/app.js" {
+		t.Fatalf("rest = %q, %v, want /app.js", rest, ok)
+	}
+}
+
+func TestRestHelper(t *testing.T) {
+	if rest, ok := Rest("/static", "/static/a/b.txt"); !ok || rest != "/a/b.txt" {
+		t.Fatalf("rest = %q, %v", rest, ok)
+	}
+	if rest, ok := Rest("", "/a"); !ok || rest != "/a" {
+		t.Fatalf("root rest = %q, %v", rest, ok)
+	}
+	if _, ok := Rest("/other", "/static/a"); ok {
+		t.Fatal("mismatched prefix should not match")
+	}
+}

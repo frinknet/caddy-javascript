@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/grafana/sobek"
 
@@ -71,6 +72,11 @@ func (c *Chain) step(errVal sobek.Value) error {
 			continue
 		}
 
+		if layer.Static != nil {
+			c.serveStatic(layer)
+			return nil
+		}
+
 		var args []sobek.Value
 		if c.pending != nil {
 			args = []sobek.Value{c.pending, c.req, c.res, c.next}
@@ -125,4 +131,27 @@ func (c *Chain) report() {
 
 func isNilValue(v sobek.Value) bool {
 	return v == nil || sobek.IsUndefined(v) || sobek.IsNull(v)
+}
+
+// serveStatic serves one static middleware layer. It hands control back to the
+// chain when the layer does not handle the request.
+func (c *Chain) serveStatic(layer *router.Layer) {
+	next := func() { c.advance(sobek.Undefined()) }
+	rest, ok := layer.Relative(c.reqString("path"))
+	if !ok {
+		next()
+		return
+	}
+	c.p.serveStaticFile(layer.Static, rest, strings.ToUpper(c.reqString("method")), next)
+}
+
+func (c *Chain) reqString(name string) string {
+	if c.req == nil {
+		return ""
+	}
+	v := c.req.Get(name)
+	if isNilValue(v) {
+		return ""
+	}
+	return v.String()
 }

@@ -39,20 +39,28 @@ type Program struct {
 	timers      map[int64]*jsTimer
 	nextTimerID int64
 
-	fsObj   *sobek.Object
-	pathObj *sobek.Object
-	appObj  *sobek.Object
+	fsObj      *sobek.Object
+	pathObj    *sobek.Object
+	appObj     *sobek.Object
+	expressObj *sobek.Object
+
+	modules map[string]*moduleRecord
+	routers map[*sobek.Object]*router.Table
+	statics map[*sobek.Object]*router.Static
 }
 
 func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger) *Program {
 	p := &Program{
-		rt:     sobek.New(),
-		routes: router.New(),
-		fs:     fsys,
-		sched:  sched,
-		logger: logger,
-		cfg:    cfg,
-		timers: make(map[int64]*jsTimer),
+		rt:      sobek.New(),
+		routes:  router.New(),
+		fs:      fsys,
+		sched:   sched,
+		logger:  logger,
+		cfg:     cfg,
+		timers:  make(map[int64]*jsTimer),
+		modules: make(map[string]*moduleRecord),
+		routers: make(map[*sobek.Object]*router.Table),
+		statics: make(map[*sobek.Object]*router.Static),
 	}
 	p.registerEnvironment()
 	return p
@@ -185,6 +193,10 @@ func (p *Program) submitAsync(ex *Exchange, fn func()) {
 		fn()
 	}
 
+	if p.sched == nil {
+		run()
+		return
+	}
 	if p.sched.Submit(run) {
 		return
 	}

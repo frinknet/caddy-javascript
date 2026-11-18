@@ -30,6 +30,10 @@ func (f *FS) ReadFile(name string) ([]byte, error) {
 	return f.root.ReadFile(relative(name))
 }
 
+func (f *FS) Stat(name string) (os.FileInfo, error) {
+	return f.root.Stat(relative(name))
+}
+
 func (f *FS) WriteFile(name string, data []byte, perm os.FileMode) error {
 	return f.root.WriteFile(relative(name), data, perm)
 }

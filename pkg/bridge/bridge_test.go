@@ -406,7 +406,12 @@ func TestEncodeBody(t *testing.T) {
 
 func serveScript(t *testing.T, script, method, path string, sched *fakeScheduler) (*httptest.ResponseRecorder, error) {
 	t.Helper()
-	fsys, err := files.NewFS(t.TempDir())
+	return serveScriptIn(t, t.TempDir(), script, method, path, sched)
+}
+
+func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeScheduler) (*httptest.ResponseRecorder, error) {
+	t.Helper()
+	fsys, err := files.NewFS(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,7 +51,7 @@ app.use((req, res) => {
 - Pure Go, `CGO_ENABLED=0`, cross-compiles with `xcaddy`.
 - Express-shaped routing: `app.get`/`app.post`/`app.put`/`app.delete`/`app.all`,
   `app.use` middleware, ordered `next()` chains, path parameters, optional
-  segments, and wildcards.
+  segments, wildcards, mounted routers, and static file middleware.
 - Request and response helpers: JSON and form bodies, query strings, headers,
   status codes, redirects, content types.
 - Async completion: timers, outbound `fetch`, and async `fs` callbacks keep the
@@ -294,6 +294,57 @@ Paths:
 An error that no error handler takes is reported as `500 Internal Server
 Error`, unless a response was already written.
 
+### Routers: `express.Router()`
+
+```js
+const express = require('express')
+const router = express.Router()
+
+router.get('/users/:id', (req, res) => res.json({ id: req.params.id }))
+router.use((req, res, next) => { res.set('X-API', '1'); next() })
+
+app.use('/api', router) // GET /api/users/7 -> {"id":"7"}
+```
+
+`express.Router()` returns a router with the same route and `use` methods as
+the app. Mount it with `app.use([path,] router)`, and mount routers inside
+routers the same way. A mounted router's paths are relative to the mount path:
+the mount prefix is removed before matching, so `router.get('/users')` mounted
+at `/api` matches `/api/users`. Parameters captured by the mount path are
+merged into `req.params`, and routes added to a router after it is mounted are
+still seen.
+
+`req.path` is not rewritten: handlers inside a router see the full request
+path, matching the `app.use` rule above. A router that matches nothing falls
+through to the next layer of its parent, so later middleware still runs. There
+is no `router.route()` chain and no `router.param()`.
+
+### Static files: `express.static()`
+
+```js
+const express = require('express')
+
+app.use(express.static('public'))
+app.use('/static', express.static('public'))
+```
+
+`express.static(root, [options])` returns middleware that serves files below
+`root`, resolved inside the sandbox. Mounted at a path, the mount prefix is
+stripped before the file is looked up. Directory requests serve the index file.
+Supported options:
+
+| Option | Default | Behavior |
+|---|---|---|
+| `index` | `"index.html"` | Index file for a directory. `false` disables it. |
+| `fallthrough` | `true` | Continue the chain when the file is missing. `false` sends `404`. |
+| `dotfiles` | `"ignore"` | `"allow"` serves dotted paths, `"deny"` sends `403`, `"ignore"` falls through. |
+
+Only `GET` and `HEAD` are served; other methods fall through. Files are read
+whole and served with `Content-Type`, `Content-Length`, and `Last-Modified`.
+There is no range support, no conditional `304` handling, and no directory
+redirect, so `/dir` and `/dir/` both serve the index. Dotfiles are ignored by
+default.
+
 ### Request: `req`
 
 | Property | Description |
@@ -357,12 +408,20 @@ open indefinitely. Outstanding timers are abandoned on shutdown.
 
 ### `fetch`
 
-`fetch(url, cb)` performs an asynchronous GET and delivers `cb(err, res)` on the
-event loop. `err` is a string, `res.status` is the numeric status, and
-`res.text` is the body.
+`fetch(url[, options])` returns a Promise. Passing a callback instead delivers
+`cb(err, res)` on the event loop and keeps the older response shape.
 
 ```js
+// Promise form
 app.get('/proxy', (req, res) => {
+	fetch('https://api.example.com/data')
+		.then((upstream) => upstream.text())
+		.then((text) => res.type('application/json').send(text))
+		.catch((err) => res.status(502).send(err.message))
+})
+
+// Callback form; err is a string and res.text is the whole body
+app.get('/proxy-cb', (req, res) => {
 	fetch('https://api.example.com/data', (err, upstream) => {
 		if (err) return res.status(502).send(String(err))
 		res.status(upstream.status).type('application/json').send(upstream.text)
@@ -370,16 +429,58 @@ app.get('/proxy', (req, res) => {
 })
 ```
 
+Options:
+
+| Option | Behavior |
+|---|---|
+| `method` | HTTP method, default `GET`. A body with `GET` or `HEAD` rejects. |
+| `headers` | Plain object. Array values add repeated headers; `Host` sets the request host. |
+| `body` | Request body as a string. |
+
+The Promise resolves to a response with `status`, `statusText`, `ok`, `url`,
+`redirected`, and `headers`. `headers` is an object of lowercased names plus
+`get(name)`, `has(name)`, and `forEach(fn)`. The body is consumed with
+`text()`, `json()`, or `body.getReader()`:
+
+```js
+app.get('/stream', (req, res) => {
+	fetch('https://api.example.com/feed')
+		.then((upstream) => {
+			const reader = upstream.body.getReader()
+			let out = ''
+			const pump = () => reader.read().then((step) => {
+				if (step.done) return res.send(out)
+				out += step.value
+				return pump()
+			})
+			return pump()
+		})
+		.catch((err) => res.status(502).send(err.message))
+})
+```
+
+`reader.read()` resolves to `{ done, value }`, where `value` is a string chunk,
+and `reader.cancel()` stops the body. A body can be consumed once, and the
+reader and `text()`/`json()` are mutually exclusive. Only one read is
+outstanding at a time, so a slow script backpressures the network.
+
+The callback form exposes `status`, `statusText`, `ok`, `url`, `redirected`,
+`headers`, and `text` (the whole body as a string). It has no streaming and no
+`text()`/`json()` methods.
+
 Behavior and limits:
 
 - Requests are denied unless the host is in `fetch_allow`.
 - A listed host is allowed as-is, including internal hostnames. With `*`, the
   host is resolved and every address must be public.
 - Redirects are re-checked against the same rules, up to 5 hops.
-- Request timeout is 10s, and the response body is capped at 1 MiB.
-- Only GET is supported. There is no options object, no request body, no
-  response headers, and no Promise form.
-- Blocking is an error to the callback, so scripts decide the HTTP status.
+- The timeout is 10s for the whole exchange, including streaming, and the
+  response body is capped at 1 MiB.
+- The Promise rejects with an `Error`; the callback's `err` remains a string.
+- Request bodies are strings, and there is no `FormData`, `Blob`,
+  `URLSearchParams`, `AbortSignal`, `arrayBuffer()`, or `clone()`.
+- A Promise response body that is never consumed is abandoned; its request is
+  closed when the timeout fires.
 
 ### `fs`
 
@@ -412,15 +513,37 @@ filesystem. Use it to build names for `fs`.
 
 ### `require`
 
-`require` supports only the built-in shims:
+`require` resolves a CommonJS module and returns its `exports`. The built-in
+shims always win:
 
 - `fs` and `node:fs`
 - `path` and `node:path`
 - `express`
 
-Anything else throws. There is no local module loading, no `node_modules`
-resolution, and no package manager. `express.Router()` and `express.static()`
-are not implemented; only the app factory is.
+Anything else is treated as a path. Local specifiers (`./`, `../`, and `/`) are
+resolved from the directory of the file doing the requiring. A bare name like
+`leftpad` searches `node_modules` starting in that directory and walking up to
+the root. Resolution tries the exact file, then `.js`, then `.json`, then a
+directory's `package.json` `main`, then its `index.js` or `index.json`.
+
+Each module runs once in its own scope with `module`, `exports`, `require`,
+`__filename`, and `__dirname`, and its `exports` is cached for the life of the
+runtime. A reload rebuilds the VM and so empties the cache; editing a module
+does not reload by itself, only the entry script is watched.
+
+Everything stays inside `root`. A module cannot reach above it, and there is no
+package manager or npm install. The `express` shim provides the app factory
+plus `Router()` and `static()`.
+
+```js
+// lib/greet.js
+module.exports = (name) => `hello ${name}`
+
+// server.js
+const greet = require('./lib/greet')
+const leftpad = require('leftpad') // from node_modules
+app.get('/hi', (req, res) => res.send(greet(leftpad('x'))))
+```
 
 ### `process.env`
 
@@ -527,9 +650,9 @@ level. Panics recovered by the event loop are logged as
 Treat scripts as trusted server-side code. The sandbox is about blast radius,
 not about running untrusted code.
 
-- **Filesystem.** `fs` and `path` are rooted at `root`, defaulting to the
-  script's directory. `os.Root` blocks `..` and symlink escapes. Everything
-  under the root is readable and writable by the script.
+- **Filesystem.** `fs`, `path`, and `express.static` are rooted at `root`,
+  defaulting to the script's directory. `os.Root` blocks `..` and symlink
+  escapes. Everything under the root is readable and writable by the script.
 - **Network.** `fetch` is denied by default. Listing a host allows it verbatim,
   which is the escape hatch for internal services. `*` still refuses private,
   loopback, link-local, multicast, and unspecified addresses, including after
@@ -598,10 +721,8 @@ not exposed outside the container by default.
 
 Not implemented today:
 
-- npm packages, `express.Router()`, and `express.static()`.
-- Local module loading via `require`.
-- `fetch` options, request bodies, response headers, and Promise form.
-- Streaming responses, SSE, WebSocket upgrades, and `sendFile`.
+- npm installation.
+- Server-side streaming responses, SSE, WebSocket upgrades, and `sendFile`.
 - Request-level cancellation of async work.
 
 `spec.md` describes the design target and the intended Express parity.
