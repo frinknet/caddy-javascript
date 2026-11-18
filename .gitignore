@@ -1,3 +1,6 @@
 AGENTS.md
 BACKLOG.md
-tests/e2e/app/tmp/
+*.swp
+*.swo
+*~
+.env
