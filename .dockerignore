@@ -1,7 +1,10 @@
 .git
 .gitignore
 .github
+.crush
 README.md
+AGENTS.md
+BACKLOG.md
 *.md
 !LICENSE
 tests/
