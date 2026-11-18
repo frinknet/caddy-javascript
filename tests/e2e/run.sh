@@ -1,4 +1,6 @@
 #!/bin/sh
+# Orchestrates the e2e run: build the plugin image, start it on a private
+# network, then drive it with tests/e2e/cases.sh from a client container.
 set -eu
 
 cd "$(dirname "$0")/../.."
@@ -7,7 +9,6 @@ ROOT=$(pwd)
 IMAGE=${IMAGE:-caddy-javascript:test}
 NET=${NET:-caddy-sf-e2e-net}
 SRV=${SRV:-caddy-sf-e2e-srv}
-MODVOL=${MODVOL:-caddy-sf-mod}
 TOOL=${TOOL:-caddy:2.11.9-builder-alpine}
 PORT=${PORT:-8080}
 E2E="$ROOT/tests/e2e"
@@ -39,14 +40,11 @@ docker run -d --rm --name "$SRV" --network "$NET" \
 
 status=0
 docker run --rm --network "$NET" \
-	-v "$ROOT:/src" -w /src \
+	-v "$E2E:/e2e:ro" \
 	-v "$WORK/app:/work" \
-	-v "$MODVOL:/mod" \
-	-e GOMODCACHE=/mod -e GOCACHE=/mod/gocache -e CGO_ENABLED=0 \
-	-e CADDY_E2E_ADDR="http://$SRV:$PORT" \
-	-e CADDY_E2E_CASES=/src/tests/e2e/cases \
-	-e CADDY_E2E_APP=/work \
-	"$TOOL" go test -count=1 -v ./tests/e2e/ || status=$?
+	-e BASE_URL="http://$SRV:$PORT" \
+	-e APP_DIR=/work \
+	"$TOOL" sh /e2e/cases.sh || status=$?
 
 if [ "$status" -ne 0 ]; then
 	echo "--- server logs ---"

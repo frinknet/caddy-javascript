@@ -766,17 +766,18 @@ docker run --rm \
 ```
 
 End-to-end suite. It builds the plugin image, starts it, and drives it over
-HTTP with table-driven cases from `tests/e2e/cases`:
+HTTP with assertions in `tests/e2e/cases.sh`:
 
 ```sh
 tests/e2e/run.sh          # rebuilds the image first
 BUILD=0 tests/e2e/run.sh  # reuse the existing image
 ```
 
-The harness copies `tests/e2e/app` to a temp directory and mounts it at
-`/e2e/app` in the server and `/work` in the client, so reload tests can edit the
-script. Without `CADDY_E2E_ADDR` the Go tests skip, which keeps a bare
-`go test ./...` green.
+`run.sh` is the container orchestration: it copies `tests/e2e/app` to a temp
+directory and mounts it at `/e2e/app` in the server, then runs `cases.sh` in a
+client container that sees the same app at `/work` so the reload check can edit
+the script. The checks are plain shell and curl, and the harness runs entirely
+in Docker, so a bare `go test ./...` stays green.
 
 Manual testing uses the sample app in `www/test`:
 
@@ -788,10 +789,10 @@ cd www/test
 CI runs all of the above: format, build, vet, unit tests, the race detector,
 and the e2e suite. See `.github/workflows/ci.yml`.
 
-When adding request/response checks, add a case file under `tests/e2e/cases`
-instead of new Go code. The runner understands `method`, `path`, `body`,
-`headers`, `wantStatus`, `wantContentType`, `wantBodyEquals`,
-`wantBodyContains`, and `wantHeaders`.
+When adding request/response checks, add a `check` line to
+`tests/e2e/cases.sh` instead of new Go code. The helper takes a name, method,
+path, and any of `--status`, `--ctype`, `--equals`, `--contains`, `--header`,
+`--hdr`, `--data`, and `--data-file`.
 
 ## Compatibility
 
@@ -816,7 +817,7 @@ pkg/bridge           Sobek runtime, JS globals, req/res, timers, fetch, watchdog
 pkg/router           route table and dispatch
 pkg/files            sandboxed fs, path.join, fsnotify hot reload
 www/test             sample Caddyfile, run.sh, and app for manual testing
-tests/e2e            end-to-end harness, app, and case files
+tests/e2e            end-to-end bash harness, server app, and check script
 spec.md              design target
 ```
 
