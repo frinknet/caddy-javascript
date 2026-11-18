@@ -18,6 +18,7 @@ import (
 	"github.com/frinknet/caddy-javascript/pkg/bridge"
 	"github.com/frinknet/caddy-javascript/pkg/config"
 	"github.com/frinknet/caddy-javascript/pkg/files"
+	"github.com/frinknet/caddy-javascript/pkg/metric"
 	"github.com/frinknet/caddy-javascript/pkg/sched"
 )
 
@@ -130,7 +131,7 @@ func (h *Handler) reload() {
 
 	h.prog = prog
 	h.logger.Info("javascript: reloaded script", zap.String("path", h.scriptPath))
-	metricReloads.Inc()
+	metric.Reloads.Inc()
 }
 
 func (h *Handler) Cleanup() error {
@@ -153,7 +154,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		if errors.Is(err, bridge.ErrBodyTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		metricRequests.WithLabelValues(strconv.Itoa(status)).Inc()
+		metric.Requests.WithLabelValues(strconv.Itoa(status)).Inc()
 		return caddyhttp.Error(status, err)
 	}
 
@@ -164,8 +165,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		h.serve(ex, rc)
 	})
 	if !scheduled {
-		metricQueueFull.Inc()
-		metricRequests.WithLabelValues(strconv.Itoa(http.StatusServiceUnavailable)).Inc()
+		metric.QueueFull.Inc()
+		metric.Requests.WithLabelValues(strconv.Itoa(http.StatusServiceUnavailable)).Inc()
 		return caddyhttp.Error(http.StatusServiceUnavailable, fmt.Errorf("javascript: event queue full"))
 	}
 
@@ -193,7 +194,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 	}
 
-	metricRequests.WithLabelValues(strconv.Itoa(srw.Status())).Inc()
+	metric.Requests.WithLabelValues(strconv.Itoa(srw.Status())).Inc()
 	return nil
 }
 
@@ -230,7 +231,7 @@ func (h *Handler) serve(ex *bridge.Exchange, rc *bridge.RequestContext) {
 
 	if err != nil {
 		if _, ok := err.(*sobek.InterruptedError); ok {
-			metricTimeouts.Inc()
+			metric.Timeouts.Inc()
 		}
 		if !w.Written() {
 			status := http.StatusInternalServerError

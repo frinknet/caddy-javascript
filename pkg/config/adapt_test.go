@@ -1,10 +1,12 @@
-package caddyjavascript
+package config_test
 
 import (
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	_ "github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+
+	_ "github.com/frinknet/caddy-javascript"
 )
 
 func TestAdaptCaddyfile(t *testing.T) {

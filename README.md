@@ -682,8 +682,8 @@ directive before `file_server`.
 
 ```
 javascript.go        Caddy module glue: registration, Provision, Cleanup, ServeHTTP
-metrics.go           Prometheus counters
 pkg/config           options, defaults, validation, Caddyfile parsing
+pkg/metric           Prometheus counters
 pkg/sched            task queue, single-thread run loop, backpressure, drain
 pkg/bridge           Sobek runtime, JS globals, req/res, timers, fetch, watchdog
 pkg/router           route table and dispatch
