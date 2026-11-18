@@ -1,10 +1,12 @@
 package bridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -61,8 +63,10 @@ func parseBody(data []byte, contentType string) interface{} {
 		return nil
 	}
 	mediaType := contentType
-	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
+	params := map[string]string{}
+	if mt, p, err := mime.ParseMediaType(contentType); err == nil {
 		mediaType = mt
+		params = p
 	}
 	switch {
 	case mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"):
@@ -74,15 +78,57 @@ func parseBody(data []byte, contentType string) interface{} {
 		if values, err := url.ParseQuery(string(data)); err == nil {
 			return urlValues(values)
 		}
+	case mediaType == "multipart/form-data":
+		if fields, ok := multipartValues(data, params["boundary"]); ok {
+			return fields
+		}
 	}
 	return string(data)
+}
+
+func multipartValues(data []byte, boundary string) (map[string]interface{}, bool) {
+	if boundary == "" {
+		return nil, false
+	}
+	out := make(map[string]interface{})
+	reader := multipart.NewReader(bytes.NewReader(data), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return out, true
+		}
+		if err != nil {
+			return nil, false
+		}
+		name := part.FormName()
+		if name == "" || part.FileName() != "" {
+			_ = part.Close()
+			continue
+		}
+		value, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil {
+			return nil, false
+		}
+		if _, seen := out[name]; !seen {
+			out[name] = string(value)
+		}
+	}
 }
 
 func urlValues(values url.Values) map[string]interface{} {
 	out := make(map[string]interface{}, len(values))
 	for k, v := range values {
-		if len(v) > 0 {
+		switch len(v) {
+		case 0:
+		case 1:
 			out[k] = v[0]
+		default:
+			items := make([]interface{}, len(v))
+			for i, item := range v {
+				items[i] = item
+			}
+			out[k] = items
 		}
 	}
 	return out

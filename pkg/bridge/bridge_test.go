@@ -153,6 +153,89 @@ func TestExchangeStaysOpenForAsync(t *testing.T) {
 	}
 }
 
+func TestClearTimeoutCancelsTimer(t *testing.T) {
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	sched := &fakeScheduler{}
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, sched, nil)
+	if err := p.Load([]byte(`
+		var fired = 0
+		var t = setTimeout(function() { fired++ }, 5)
+		clearTimeout(t)
+		clearTimeout()
+		clearTimeout(undefined)
+	`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	sched.run()
+
+	v, err := p.rt.RunString("fired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.ToInteger() != 0 {
+		t.Fatalf("cleared timer fired %d times", v.ToInteger())
+	}
+	if n := sched.pending(); n != 0 {
+		t.Fatalf("%d callbacks queued for a cleared timer", n)
+	}
+}
+
+func TestTimerIDsAreDistinct(t *testing.T) {
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	sched := &fakeScheduler{}
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, sched, nil)
+	if err := p.Load([]byte(`
+		var a = setTimeout(function() {}, 1000)
+		var b = setTimeout(function() {}, 1000)
+		var c = setInterval(function() {}, 1000)
+		clearInterval(c)
+		clearTimeout(a)
+		clearTimeout(b)
+	`)); err != nil {
+		t.Fatal(err)
+	}
+	v, err := p.rt.RunString("[a, b].join(',') + ':' + String(a !== b)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.String() != "1,2:true" {
+		t.Fatalf("timer ids = %q", v.String())
+	}
+}
+
+func TestClearIntervalStopsRepeating(t *testing.T) {
+	sched := &fakeScheduler{}
+	rec, err := serveScript(t, `
+		app.get('/iv', function(req, res) {
+			var n = 0
+			var id = setInterval(function() {
+				n++
+				if (n === 3) {
+					clearInterval(id)
+					res.send('ticks=' + n)
+				}
+			}, 1)
+		})
+	`, "GET", "/iv", sched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "ticks=3" {
+		t.Fatalf("body = %q, want ticks=3", got)
+	}
+}
+
 func TestCheckFetchTarget(t *testing.T) {
 	fsys, err := files.NewFS(t.TempDir())
 	if err != nil {
@@ -243,6 +326,56 @@ func TestParseBodyURLEncoded(t *testing.T) {
 	}
 	if m["a"] != "1" || m["b"] != "2" {
 		t.Fatalf("got %v", m)
+	}
+}
+
+func TestParseBodyURLEncodedRepeatedField(t *testing.T) {
+	got := parseBody([]byte("a=1&a=2&b=3"), "application/x-www-form-urlencoded")
+	m, ok := got.(map[string]interface{})
+	if !ok {
+		t.Fatalf("got %T, want map", got)
+	}
+	values, ok := m["a"].([]interface{})
+	if !ok {
+		t.Fatalf("a = %T, want []interface{}", m["a"])
+	}
+	if len(values) != 2 || values[0] != "1" || values[1] != "2" {
+		t.Fatalf("a = %v, want [1 2]", values)
+	}
+	if m["b"] != "3" {
+		t.Fatalf("b = %v, want single string", m["b"])
+	}
+}
+
+func TestParseBodyMultipart(t *testing.T) {
+	body := "--X\r\n" +
+		"Content-Disposition: form-data; name=\"a\"\r\n\r\n" +
+		"1\r\n" +
+		"--X\r\n" +
+		"Content-Disposition: form-data; name=\"a\"\r\n\r\n" +
+		"2\r\n" +
+		"--X\r\n" +
+		"Content-Disposition: form-data; name=\"upload\"; filename=\"x.txt\"\r\n" +
+		"Content-Type: text/plain\r\n\r\n" +
+		"ignored\r\n" +
+		"--X--\r\n"
+	got := parseBody([]byte(body), "multipart/form-data; boundary=X")
+	m, ok := got.(map[string]interface{})
+	if !ok {
+		t.Fatalf("got %T, want map", got)
+	}
+	if m["a"] != "1" {
+		t.Fatalf("a = %v, want first value", m["a"])
+	}
+	if _, present := m["upload"]; present {
+		t.Fatalf("file part leaked into body: %v", m)
+	}
+}
+
+func TestParseBodyMultipartMissingBoundary(t *testing.T) {
+	got := parseBody([]byte("raw"), "multipart/form-data")
+	if got != "raw" {
+		t.Fatalf("got %v, want raw string", got)
 	}
 }
 

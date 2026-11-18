@@ -35,6 +35,10 @@ type Program struct {
 
 	current *Exchange
 
+	timersMu    sync.Mutex
+	timers      map[int64]*jsTimer
+	nextTimerID int64
+
 	fsObj   *sobek.Object
 	pathObj *sobek.Object
 	appObj  *sobek.Object
@@ -48,6 +52,7 @@ func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger)
 		sched:  sched,
 		logger: logger,
 		cfg:    cfg,
+		timers: make(map[int64]*jsTimer),
 	}
 	p.registerEnvironment()
 	return p

@@ -117,15 +117,17 @@ tagged `caddy-javascript:test`. It also rewrites the repo slug in `NOTICE`,
 `Dockerfile`, and `go.mod` from that metadata, so keep the file's first three
 lines intact. The Dockerfile is multi-stage:
 
-- build stage: `caddy:2.11.9-builder-alpine`, `xcaddy build`, then collects
-  third-party license files and compresses the binary with `upx`.
+- build stage: `caddy:2.11.9-builder-alpine`, `xcaddy build`, then the caddy
+  and plugin license files.
 - runtime stage: `FROM scratch` with the Caddy binary, toybox, CA
   certificates, tzdata, and licenses. `www/` is copied to `/srv/www`, and
   `www/Caddyfile` becomes `/etc/caddy/Caddyfile`.
 
-The image entrypoint is `/bin/caddy`, default command
-`run --config /etc/caddy/Caddyfile --adapter caddyfile`, and the data volume is
-`/var/lib/caddy`.
+The image entrypoint is `/bin/caddy` and the default command is `run`, which
+starts Caddy with an empty config: Caddy looks for `--config` in the working
+directory, and the bundled config is at `/etc/caddy/Caddyfile`. Pass
+`run --config /etc/caddy/Caddyfile --adapter caddyfile` to load it. Caddy keeps
+its state in `/var/lib/caddy`; no volume is declared for it.
 
 ## Configuration
 
@@ -311,8 +313,9 @@ Body parsing is driven by `Content-Type`:
 | Content type | `req.body` |
 |---|---|
 | `application/json` or any `+json` suffix | Parsed JSON value, or the raw string when parsing fails. |
-| `application/x-www-form-urlencoded` | Object with the first value per field. |
-| anything else, including multipart | Raw string. |
+| `application/x-www-form-urlencoded` | Object with one string per field, or an array when a field repeats. |
+| `multipart/form-data` | Object with the first text value per field; file parts are ignored. |
+| anything else | Raw string. |
 | empty body | `null`. |
 
 Requests larger than `max_body` are rejected with `413` before the script runs.
@@ -344,10 +347,13 @@ Rules and caveats:
 
 ### Timers
 
-`setTimeout(fn, ms)` schedules `fn` back on the event loop. The delay is
-clamped at zero and returns `undefined`, so timers cannot be cancelled. Pending
-timers keep the request open and are abandoned on shutdown. There is no
-`setInterval` yet.
+`setTimeout(fn, ms)` and `setInterval(fn, ms)` schedule `fn` back on the
+event loop and return a numeric id. Delays are clamped at zero, and
+`setInterval` uses a minimum of 1ms. `clearTimeout(id)` and `clearInterval(id)`
+cancel either kind of timer; missing or unknown ids are ignored.
+
+Pending timers keep the request open, and an uncleared `setInterval` keeps it
+open indefinitely. Outstanding timers are abandoned on shutdown.
 
 ### `fetch`
 
@@ -565,13 +571,15 @@ Log messages to look for:
 
 The scratch image has no shell utilities beyond toybox, config at
 `/etc/caddy/Caddyfile`, static root at `/srv/www`, and data at `/var/lib/caddy`.
+The default command is a bare `run`, so name the config on the command line.
 Mount your app and config:
 
 ```sh
 docker run --rm -p 8080:80 \
 	-v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
 	-v "$PWD/app:/srv/app:ro" \
-	caddy-javascript:test
+	caddy-javascript:test \
+	run --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 The health check polls Caddy's admin API on `127.0.0.1:2019`. The admin API is
@@ -591,9 +599,7 @@ not exposed outside the container by default.
 Not implemented today:
 
 - npm packages, `express.Router()`, and `express.static()`.
-- Multipart bodies.
 - Local module loading via `require`.
-- `setInterval`, `clearTimeout`, and timer ids.
 - `fetch` options, request bodies, response headers, and Promise form.
 - Streaming responses, SSE, WebSocket upgrades, and `sendFile`.
 - Request-level cancellation of async work.

@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
-IMAGE=${IMAGE:-caddy-sf-e2e}
+IMAGE=${IMAGE:-caddy-javascript:test}
 NET=${NET:-caddy-sf-e2e-net}
 SRV=${SRV:-caddy-sf-e2e-srv}
 MODVOL=${MODVOL:-caddy-sf-mod}
@@ -22,7 +22,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ "${BUILD:-1}" = "1" ]; then
-	docker build -t "$IMAGE" "$ROOT"
+	"$ROOT/build.sh"
 fi
 
 cp -R "$E2E/app" "$WORK/app"

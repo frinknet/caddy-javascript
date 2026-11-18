@@ -65,7 +65,7 @@ api.example.com {
 
 The runtime pre-attaches core globals upon initialization, eliminating complex package managers or build steps for basic application logic.
 
-Compatibility goal: the Express module and middleware chain are the target surface; the legacy `app` global below remains as a fallback. See `BACKLOG.md` for the gap list and P0 work.
+Compatibility goal: the Express module and middleware chain are the target surface; the legacy `app` global below remains as a fallback. See `BACKLOG.md` for the gap list.
 
 ### A. Routing Framework (`app`)
 

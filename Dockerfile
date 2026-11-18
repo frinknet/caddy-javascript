@@ -14,8 +14,7 @@ RUN case "${TARGETARCH}" in \
     && mkdir -p /out/licenses/caddy /out/licenses/toybox \
     && curl -fsSL "https://codeberg.org/landley/toybox/raw/branch/master/LICENSE" -o /out/licenses/toybox/LICENSE \
     && curl -fsSL "https://landley.net/toybox/bin/toybox-${TOYBOX_ARCH}" -o /out/toybox \
-    && chmod +x /out/toybox \
-    && upx --best --lzma /out/toybox
+    && chmod +x /out/toybox
 
 # ---------------------------------------------------------------------------
 # Stage B: Build caddy binary. Source-dependent, uses shared go cache.
