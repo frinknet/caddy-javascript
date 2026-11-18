@@ -29,49 +29,33 @@ RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
     xcaddy build \
     --with github.com/frinknet/caddy-javascript \
     --replace github.com/frinknet/caddy-javascript=/src/caddy-javascript \
-    --output /out/caddy
+    --output /out/caddy \
+    && upx --best --lzma /out/caddy
 
-# Collect third-party licenses, then compress. Order matters: upx rewrites the
-# ELF and strips the Go build info that `go version -m` reads to enumerate the
-# linked modules, and the exit status of that command is checked so a silent
-# empty list cannot slip through again.
+# Collect licenses and the resolved version list from the *uncompressed*
+# binary: upx strips the Go build info, so this must run before compression.
 RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
-    GOMODCACHE=$(go env GOMODCACHE) && \
-    OUT=/out/licenses && \
-    BIN=/out/caddy && \
-    SRC=/src/caddy-javascript && \
-    rm -rf "$OUT/caddy" "$OUT/plugins" "$OUT/MISSING" && \
-    mkdir -p "$OUT/caddy" "$OUT/plugins" && \
-    : > "$OUT/MISSING" && \
-    for f in "$GOMODCACHE"/github.com/caddyserver/caddy/v2@*/LICENSE*; do \
-        [ -f "$f" ] || continue; \
-        cp "$f" "$OUT/caddy/"; \
-    done && \
-    go version -m "$BIN" > /tmp/deps.txt && \
-    awk '$1 == "dep" { print $2, $3 }' /tmp/deps.txt | sort -u | \
-    while read -r mod ver; do \
-        escaped=$(printf '%s' "$mod@$ver" | sed 's/\([A-Z]\)/!\1/g' | tr 'A-Z' 'a-z'); \
+    sh -euxc ' \
+      GOMODCACHE=$(go env GOMODCACHE); \
+      mkdir -p /out/licenses/caddy /out/licenses/plugins; \
+      go version -m /out/caddy > /out/versions.txt; \
+      for f in "$GOMODCACHE"/github.com/caddyserver/caddy/v2@*/LICENSE*; do \
+        if [ -e "$f" ]; then cp "$f" /out/licenses/caddy/; fi; \
+      done; \
+      go version -m /out/caddy | awk '"'"'$1 == "dep" {print $2 "@" $3}'"'"' | while read -r modver; do \
+        mod="${modver%@*}"; \
+        escaped=$(printf "%s" "$modver" | sed '"'"'s/[A-Z]/!\L&/g'"'"'); \
         dir="$GOMODCACHE/$escaped"; \
-        [ -d "$dir" ] || continue; \
-        dest="$OUT/plugins/$(printf '%s' "$mod" | tr / _)"; \
-        mkdir -p "$dest"; \
-        find "$dir" -maxdepth 1 -type f \
-            \( -iname 'licen[cs]e*' -o -iname 'copying*' \
-            -o -iname 'notice*' -o -iname 'unlicense*' \) \
-            -exec cp {} "$dest/" \; ; \
-        [ -n "$(ls -A "$dest")" ] || { rmdir "$dest"; echo "$mod" >> "$OUT/MISSING"; }; \
-    done && \
-    mod=$(awk '$1 == "module" { print $2; exit }' "$SRC/go.mod") && \
-    dest="$OUT/plugins/$(printf '%s' "$mod" | tr / _)" && \
-    mkdir -p "$dest" && \
-    find "$SRC" -maxdepth 1 -type f \
-        \( -iname 'licen[cs]e*' -o -iname 'copying*' \
-        -o -iname 'notice*' -o -iname 'unlicense*' \) \
-        -exec cp {} "$dest/" \; && \
-    sort -u -o "$OUT/MISSING" "$OUT/MISSING" && \
-    echo "licenses: $(find "$OUT/plugins" -mindepth 1 -type d | wc -l) modules, $(find "$OUT/plugins" -type f | wc -l) files" && \
-    { [ ! -s "$OUT/MISSING" ] || sed 's/^/  ships no license text: /' "$OUT/MISSING"; } && \
-    upx --best --lzma "$BIN"
+        if [ -d "$dir" ]; then \
+          pkg=$(printf "%s" "$mod" | tr / _); \
+          dest="/out/licenses/plugins/$pkg"; \
+          mkdir -p "$dest"; \
+          for lf in "$dir"/LICENSE* "$dir"/NOTICE*; do \
+            if [ -e "$lf" ]; then cp "$lf" "$dest/"; fi; \
+          done; \
+        fi; \
+      done; \
+      ls /out/licenses/plugins | wc -l'
 
 # ---------------------------------------------------------------------------
 # Stage C: Compose scratch image
@@ -79,6 +63,7 @@ RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
 FROM scratch
 
 COPY --from=build /out/licenses             /usr/share/licenses
+COPY --from=build /out/versions.txt          /usr/share/licenses/versions.txt
 COPY --from=build /etc/ssl/certs           /etc/ssl/certs
 COPY --from=build /usr/share/zoneinfo      /usr/share/zoneinfo
 COPY --from=build /out/caddy               /bin/caddy

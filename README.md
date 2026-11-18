@@ -434,6 +434,23 @@ Raise `queue_size` to absorb bursts, or make handlers cheaper. Requests are
 serialized: JavaScript never runs concurrently within one instance, so a slow
 handler delays the ones behind it.
 
+### Shutdown
+
+When Caddy stops or reloads its configuration, the instance is cleaned up and
+its event loop stops. The loop first drains what is already queued, running
+those tasks in order for up to 5 seconds, then returns. Nothing new is accepted
+once it starts stopping:
+
+- New requests get `503 Service Unavailable`, because the loop no longer takes
+  submissions.
+- Async callbacks that land during the drain, from a pending `fetch`, `fs`, or
+  timer, are dropped and logged as
+  `javascript: event queue full, dropping async callback`. A response waiting on
+  one of them is left unfinished; Caddy is shutting down anyway.
+- Work still in flight outside the loop, such as an `os.Root` read or an
+  outbound `fetch`, is abandoned when the drain deadline passes. Its callback
+  arrives after the loop has stopped, so it is dropped.
+
 ### Reloading
 
 With `watch` on, the plugin watches the script's directory and reloads when the
