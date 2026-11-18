@@ -4,12 +4,12 @@
 
 ## 1. Executive Summary & Philosophy
 
-The `caddy-javascript` plugin provides a high-performance, in-process JavaScript execution environment for Caddy, engineered to deliver an **Express-like developer experience** backed by **Node.js-style asynchronous execution semantics**.
+The `caddy-javascript` plugin provides a high-performance, in-process JavaScript execution environment for Caddy, engineered as a **drop-in replacement for Express** backed by **Node.js-style asynchronous execution semantics**.
 
 Instead of relying on multi-VM pools or heavy, process-managed C++ runtimes (such as V8), the plugin embeds **Sobek**—a pure-Go ECMAScript engine—and pairs it with a **Go-powered single-threaded event loop**. This architecture satisfies key production imperatives:
 
 1. **Frictionless Compilation:** Pure-Go implementation (`CGO_ENABLED=0`) allows seamless cross-compilation and native builds via `xcaddy` without external C dependencies.
-2. **Familiar Mental Model:** Developers write standard Express-style routing DSLs (`app.get`, `app.post`) alongside pre-attached operating system primitives (`fs`, `path`, `process.env`, `fetch`), backed by a shared-heap event loop.
+2. **Familiar Mental Model:** Developers run unmodified Express apps (`require('express')`, `express()`, `app.use`, ordered middleware with `next()`) alongside pre-attached operating system primitives (`fs`, `path`, `process.env`, `fetch`), backed by a shared-heap event loop.
 3. **Developer Ergonomics (Hot-Reloading):** Built-in file watching (`fsnotify`) automatically reloads script updates on disk without requiring manual Caddy reloads during local development.
 4. **Resilience & Safety:** Non-blocking backpressure channel queuing (`503 Service Unavailable` on overload), thread-safe double-write protection (`safeResponseWriter`), header/parameter parsing, and context-bound watchdog timers (`vm.Interrupt()`) with automated flag resets.
 
@@ -64,6 +64,8 @@ api.example.com {
 ## 3. Supported JavaScript API Surface
 
 The runtime pre-attaches core globals upon initialization, eliminating complex package managers or build steps for basic application logic.
+
+Compatibility goal: the Express module and middleware chain are the target surface; the legacy `app` global below remains as a fallback. See `BACKLOG.md` for the gap list and P0 work.
 
 ### A. Routing Framework (`app`)
 

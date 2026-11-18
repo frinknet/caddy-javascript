@@ -1,0 +1,58 @@
+[
+  {
+    "name": "queryAll returns every value",
+    "method": "GET",
+    "path": "/queryall?a=1&a=2",
+    "wantStatus": 200,
+    "wantContentType": "application/json",
+    "wantBodyContains": "\"a\":[\"1\",\"2\"]"
+  },
+  {
+    "name": "res.set writes a header",
+    "method": "GET",
+    "path": "/header",
+    "wantStatus": 200,
+    "wantBodyEquals": "ok",
+    "wantHeaders": { "X-Custom": "yes" }
+  },
+  {
+    "name": "res.type sets content type",
+    "method": "GET",
+    "path": "/type",
+    "wantStatus": 200,
+    "wantContentType": "text/csv",
+    "wantBodyEquals": "a,b"
+  },
+  {
+    "name": "res.redirect sends a location",
+    "method": "GET",
+    "path": "/redirect",
+    "wantStatus": 302,
+    "wantHeaders": { "Location": "/hello" }
+  },
+  {
+    "name": "res.end sends no body",
+    "method": "GET",
+    "path": "/end",
+    "wantStatus": 204,
+    "wantBodyEquals": ""
+  },
+  {
+    "name": "urlencoded body is parsed",
+    "method": "POST",
+    "path": "/form",
+    "body": "a=1&b=2",
+    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+    "wantStatus": 200,
+    "wantContentType": "application/json",
+    "wantBodyContains": "\"a\":\"1\""
+  },
+  {
+    "name": "req.header reads a request header",
+    "method": "GET",
+    "path": "/echoheader",
+    "headers": { "X-Test": "hello" },
+    "wantStatus": 200,
+    "wantBodyEquals": "hello"
+  }
+]
