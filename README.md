@@ -49,8 +49,9 @@ app.use((req, res) => {
 ## Features
 
 - Pure Go, `CGO_ENABLED=0`, cross-compiles with `xcaddy`.
-- Express-shaped routing (`app.get`, `app.post`, `app.use`) with exact path
-  matching.
+- Express-shaped routing: `app.get`/`app.post`/`app.put`/`app.delete`/`app.all`,
+  `app.use` middleware, ordered `next()` chains, path parameters, optional
+  segments, and wildcards.
 - Request and response helpers: JSON and form bodies, query strings, headers,
   status codes, redirects, content types.
 - Async completion: timers, outbound `fetch`, and async `fs` callbacks keep the
@@ -155,7 +156,7 @@ takes one or more names.
 | `queue_size` | `5000` | Number of queued tasks (requests plus async callbacks). |
 | `max_body` | `1048576` | Bytes. Larger bodies get `413`. `0` means the default. |
 | `watch` | on | `watch`, `watch true`, `watch false`. Watches the script's directory. |
-| `fallthrough` | off | When no route or fallback matches, call the next HTTP handler. |
+| `fallthrough` | off | When nothing matches, call the next HTTP handler. |
 | `env_allow` | empty | Each name is copied into `process.env`. `*` exposes the whole environment. |
 | `fetch_allow` | empty | Exact host matches, case-insensitive. `*` allows any host that resolves only to public addresses. |
 
@@ -251,21 +252,45 @@ the defaults listed above.
 
 | Call | Behavior |
 |---|---|
-| `app.get(path, fn)` | Register a GET handler for an exact path. |
-| `app.post(path, fn)` | Register a POST handler for an exact path. |
-| `app.use(fn)` | Register the fallback handler for unmatched requests. |
+| `app.get(path, ...fns)` | Register a GET route. |
+| `app.post(path, ...fns)` | Register a POST route. |
+| `app.put`, `app.delete`, `app.patch`, `app.head`, `app.options` | Same, for those methods. |
+| `app.all(path, ...fns)` | Register a route for every method. |
+| `app.use([path,] ...fns)` | Register middleware. Without a path it matches every request; with one it matches that path and everything under it. |
+| `app.listen(...)` | No-op that returns the app. Caddy owns the listener. |
 
-Details:
+`require('express')` returns a factory that hands back the same app object, so
+unmodified Express style works:
 
-- Matching is an exact string compare on `method + " " + path`. No parameters,
-  wildcards, trailing-slash normalization, or case folding.
-- The query string is not part of the match.
-- Registering the same method and path twice overwrites the earlier handler.
-- `app.use` sets a single fallback; calling it again replaces the previous one.
-  There is no `next()` and no middleware chain yet.
-- Passing a non-function throws a `TypeError`.
-- Only GET and POST exist. Other methods never match, so with `fallthrough` off
-  they return 404.
+```js
+const express = require('express')
+const app = express()
+
+app.get('/', (req, res) => res.send('hi'))
+app.listen(3000)
+```
+
+Layers run in registration order, the way Express runs its stack. A handler
+advances the chain with `next()`, and `next(err)` skips ahead to the next error
+handler, which is a function taking four arguments `(err, req, res, next)`. A
+handler that never calls `next()` ends the chain. Writing a response does not
+stop the chain, but the first write commits the response and later writes are
+ignored. Registering the same method and path twice appends both, so both run.
+
+Paths:
+
+- `:name` captures one segment into `req.params.name`. `:name?` also matches
+  when the segment is absent, and `*` captures the rest of the path into
+  `req.params[0]`.
+- Matching is case-insensitive and ignores a trailing slash, so `/Users/` and
+  `/users` are the same route. The query string is not part of the match.
+- `app.use` paths are prefixes, and the prefix is not stripped from `req.path`.
+- Passing something that is not a function throws a `TypeError`. Calling a
+  method the app does not implement throws too, because the property does not
+  exist.
+
+An error that no error handler takes is reported as `500 Internal Server
+Error`, unless a response was already written.
 
 ### Request: `req`
 
@@ -274,6 +299,7 @@ Details:
 | `req.path` | Decoded URL path. |
 | `req.method` | HTTP method. |
 | `req.host` | Request `Host`, including port when present. |
+| `req.params` | Path parameters captured by the matched route. |
 | `req.headers` | Object of header values, canonical names (`Content-Type`), first value only. |
 | `req.header(name)` | Case-insensitive header lookup, first value or `undefined`. |
 | `req.query` | Object of query parameters, first value per name. |
@@ -384,9 +410,11 @@ filesystem. Use it to build names for `fs`.
 
 - `fs` and `node:fs`
 - `path` and `node:path`
+- `express`
 
 Anything else throws. There is no local module loading, no `node_modules`
-resolution, and no package manager.
+resolution, and no package manager. `express.Router()` and `express.static()`
+are not implemented; only the app factory is.
 
 ### `process.env`
 
@@ -403,7 +431,8 @@ The HTTP handler does not return when the script returns. It waits until the
 response is written or until no async work remains for that request:
 
 1. Caddy reads and parses the body, then submits a task to the event loop.
-2. The route handler runs on the loop goroutine.
+2. The layers that match the request run on the loop goroutine, in
+   registration order, each advancing the chain with `next()`.
 3. If the handler schedules `fetch`, timers, or async `fs`, the exchange keeps
    a pending count. Callbacks are re-submitted to the same loop.
 4. The request finishes when the response is written, or when the handler has
@@ -471,10 +500,11 @@ script is written, created, or renamed, debounced by 200ms.
 | Situation | Response |
 |---|---|
 | Route matched and wrote a response | Whatever the script sent. |
-| No route, no fallback, `fallthrough` off | `404 Not Found` (plain text). |
-| No route, no fallback, `fallthrough` on | Next HTTP handler. |
+| No route or middleware matched, `fallthrough` off | `404 Not Found` (plain text). |
+| No route or middleware matched, `fallthrough` on | Next HTTP handler. |
 | Route matched, handler wrote nothing | `404 Not Found`. |
-| Script throws, nothing written | `500 Internal Server Error`. |
+| Script throws or calls `next(err)`, nothing written | `500 Internal Server Error`. |
+| `next(err)` reaches an error handler | Whatever the error handler sent. |
 | Handler exceeds `timeout`, nothing written | `504 Gateway Timeout`. |
 | Handler exceeds `timeout` after writing | Partial response stands, error logged. |
 | Body exceeds `max_body` | `413 Request Entity Too Large`. |
@@ -560,10 +590,7 @@ not exposed outside the container by default.
 
 Not implemented today:
 
-- `app.put`, `app.delete`, `app.all`, and other methods.
-- Path parameters, wildcards, and `req.params`.
-- Middleware chains and `next()`.
-- `require('express')` and npm packages.
+- npm packages, `express.Router()`, and `express.static()`.
 - Multipart bodies.
 - Local module loading via `require`.
 - `setInterval`, `clearTimeout`, and timer ids.
@@ -671,7 +698,7 @@ spec.md              design target
 | Symptom | Likely cause |
 |---|---|
 | Caddy will not start, `failed to initialize runtime` | The script throws while loading, or the path is wrong. Check the path and run it under `watch false` with logs at debug level. |
-| `404` on a route you registered | Path mismatch (trailing slash, case), wrong method, or the handler returned without writing. Matching is exact. |
+| `404` on a route you registered | Wrong path or method, or a handler returned without writing. Trailing slashes and case are ignored, so check for a typo or a missing `next()`. |
 | `404` for everything, no script errors | Script failed to load and the handler has no program, or the directive is in a `handle` block whose matcher does not match. |
 | `503 Service Unavailable` | Queue full. Raise `queue_size`, or find the slow handler blocking the loop. |
 | `504 Gateway Timeout` | `timeout` is too small, or the handler has an infinite loop. Async callbacks are not covered by the watchdog. |

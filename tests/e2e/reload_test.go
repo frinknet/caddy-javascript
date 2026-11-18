@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,7 +29,10 @@ func TestReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated := string(src) + "\napp.get('/version', (req, res) => { res.send('v2') })\n"
+	updated := strings.Replace(string(src), "res.send('v1')", "res.send('v2')", 1)
+	if updated == string(src) {
+		t.Fatal("did not find the version route to rewrite")
+	}
 	if err := os.WriteFile(script, []byte(updated), 0o644); err != nil {
 		t.Fatal(err)
 	}

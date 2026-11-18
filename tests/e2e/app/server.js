@@ -67,6 +67,47 @@ app.get('/fetch-blocked', (req, res) => {
   })
 })
 
+const express = require('express')
+const api = express()
+
+api.get('/express/hello', (req, res) => res.send('express hello'))
+api.put('/express/put', (req, res) => res.send('put ok'))
+api.delete('/express/delete', (req, res) => res.send('delete ok'))
+api.all('/express/any', (req, res) => res.send(req.method))
+api.head('/express/head', (req, res) => {
+  res.set('X-Head', 'yes').send('')
+})
+api.listen(3000)
+
+app.use('/mw', (req, res, next) => {
+  res.set('X-MW', 'yes')
+  next()
+})
+
+app.get('/mw/hello', (req, res) => res.send('mw hello'))
+
+app.get(
+  '/mw/route',
+  (req, res, next) => {
+    res.set('X-Route-MW', '1')
+    next()
+  },
+  (req, res) => res.send('route mw')
+)
+
+app.get('/users/:id', (req, res) => res.json({ id: req.params.id }))
+app.get('/users/:id/posts/:post', (req, res) => res.json(req.params))
+app.get('/files/*', (req, res) => res.send(String(req.params[0])))
+
+app.get('/boom', (req, res, next) => next(new Error('kaboom')))
+app.use('/boom', (err, req, res, next) => {
+  res.status(503).send('handled: ' + err.message)
+})
+
+app.get('/throw', (req, res) => {
+  throw new Error('nope')
+})
+
 app.use((req, res) => {
   res.status(404).send('not found')
 })

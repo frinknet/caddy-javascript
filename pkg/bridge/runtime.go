@@ -37,6 +37,7 @@ type Program struct {
 
 	fsObj   *sobek.Object
 	pathObj *sobek.Object
+	appObj  *sobek.Object
 }
 
 func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger) *Program {
@@ -57,11 +58,10 @@ func (p *Program) Load(src []byte) error {
 	return err
 }
 
-func (p *Program) Lookup(method, path string) sobek.Callable {
-	if fn := p.routes.Lookup(method, path); fn != nil {
-		return fn
-	}
-	return p.routes.Fallback()
+// Match returns the layers registered for the request, in registration order,
+// with the parameters captured from the path.
+func (p *Program) Match(method, path string) ([]*router.Layer, map[string]string) {
+	return p.routes.Match(method, path)
 }
 
 func (p *Program) Runtime() *sobek.Runtime {
@@ -77,6 +77,9 @@ type Exchange struct {
 	handled  int32
 	once     sync.Once
 	Done     chan struct{}
+
+	errMu sync.Mutex
+	err   error
 }
 
 func NewExchange(w *ResponseWriter) *Exchange {
@@ -91,6 +94,20 @@ func (e *Exchange) SetHandled(v bool) {
 	if v {
 		atomic.StoreInt32(&e.handled, 1)
 	}
+}
+
+// SetError records a handler error that happened after the initial invocation
+// returned, such as one raised from an async callback or from next(err).
+func (e *Exchange) SetError(err error) {
+	e.errMu.Lock()
+	defer e.errMu.Unlock()
+	e.err = err
+}
+
+func (e *Exchange) Err() error {
+	e.errMu.Lock()
+	defer e.errMu.Unlock()
+	return e.err
 }
 
 func (e *Exchange) Handled() bool {

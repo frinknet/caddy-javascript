@@ -1,6 +1,7 @@
 package router
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/grafana/sobek"
@@ -18,26 +19,127 @@ func fn(rt *sobek.Runtime, body string) sobek.Callable {
 	return callable
 }
 
-func TestLookupAndFallback(t *testing.T) {
+func TestExactMatch(t *testing.T) {
 	rt := sobek.New()
 	table := New()
+	table.Add("GET", "/a", fn(rt, "return 'get'"), 2)
 
-	get := fn(rt, "return 'get'")
-	fallback := fn(rt, "return 'fallback'")
+	if got, _ := table.Match("GET", "/a"); len(got) != 1 {
+		t.Fatalf("GET /a matched %d layers, want 1", len(got))
+	}
+	if got, _ := table.Match("POST", "/a"); len(got) != 0 {
+		t.Fatalf("POST /a matched %d layers, want 0", len(got))
+	}
+	if got, _ := table.Match("GET", "/b"); len(got) != 0 {
+		t.Fatalf("GET /b matched %d layers, want 0", len(got))
+	}
+}
 
-	table.Add("GET", "/a", get)
-	table.SetFallback(fallback)
+func TestMatchIsNonStrictAndCaseInsensitive(t *testing.T) {
+	rt := sobek.New()
+	table := New()
+	table.Add("GET", "/Hello/", fn(rt, ""), 2)
 
-	if got := table.Lookup("GET", "/a"); got == nil {
-		t.Fatal("expected GET /a to match")
+	for _, path := range []string{"/Hello", "/hello", "/HELLO/", "/hello"} {
+		if got, _ := table.Match("GET", path); len(got) != 1 {
+			t.Fatalf("%s matched %d layers, want 1", path, len(got))
+		}
 	}
-	if got := table.Lookup("POST", "/a"); got != nil {
-		t.Fatal("method mismatch should not match")
+}
+
+func TestPathParameters(t *testing.T) {
+	rt := sobek.New()
+	table := New()
+	table.Add("GET", "/users/:id/posts/:post", fn(rt, ""), 2)
+
+	layers, params := table.Match("GET", "/users/7/posts/9")
+	if len(layers) != 1 {
+		t.Fatalf("matched %d layers, want 1", len(layers))
 	}
-	if got := table.Lookup("GET", "/b"); got != nil {
-		t.Fatal("path mismatch should not match")
+	want := map[string]string{"id": "7", "post": "9"}
+	if !reflect.DeepEqual(params, want) {
+		t.Fatalf("params = %v, want %v", params, want)
 	}
-	if got := table.Fallback(); got == nil {
-		t.Fatal("expected fallback to be set")
+
+	if _, params := table.Match("GET", "/users/7/posts"); params != nil {
+		t.Fatalf("short path should not match, got %v", params)
+	}
+	if _, params := table.Match("GET", "/users/7/posts/9/extra"); params != nil {
+		t.Fatalf("long path should not match, got %v", params)
+	}
+}
+
+func TestOptionalParameterAndWildcard(t *testing.T) {
+	rt := sobek.New()
+	table := New()
+	table.Add("GET", "/opt/:name?", fn(rt, ""), 2)
+	table.Add("GET", "/files/*", fn(rt, ""), 2)
+
+	if _, params := table.Match("GET", "/opt"); params != nil {
+		t.Fatalf("optional segment should match without a value, got %v", params)
+	}
+	if _, params := table.Match("GET", "/opt/x"); params["name"] != "x" {
+		t.Fatalf("optional segment = %v, want x", params)
+	}
+
+	_, params := table.Match("GET", "/files/a/b/c.txt")
+	if params["0"] != "a/b/c.txt" {
+		t.Fatalf("wildcard = %v, want a/b/c.txt", params)
+	}
+	if _, params := table.Match("GET", "/files"); params["0"] != "" {
+		t.Fatalf("wildcard should match the empty rest, got %v", params)
+	}
+}
+
+func TestUseMatchesPrefixAndEveryMethod(t *testing.T) {
+	rt := sobek.New()
+	table := New()
+	table.Use("/api", fn(rt, ""), 3)
+	table.Use("", fn(rt, ""), 2)
+
+	if got, _ := table.Match("POST", "/api/users"); len(got) != 2 {
+		t.Fatalf("/api/users matched %d layers, want 2", len(got))
+	}
+	if got, _ := table.Match("POST", "/api"); len(got) != 2 {
+		t.Fatalf("/api matched %d layers, want 2", len(got))
+	}
+	if got, _ := table.Match("POST", "/apix"); len(got) != 1 {
+		t.Fatalf("/apix matched %d layers, want 1", len(got))
+	}
+	if got, _ := table.Match("POST", "/other"); len(got) != 1 {
+		t.Fatalf("/other matched %d layers, want 1", len(got))
+	}
+}
+
+func TestMatchPreservesRegistrationOrder(t *testing.T) {
+	rt := sobek.New()
+	table := New()
+	first := fn(rt, "return 1")
+	second := fn(rt, "return 2")
+	table.Use("", first, 2)
+	table.Add("GET", "/x", second, 2)
+	table.Use("", fn(rt, "return 3"), 2)
+
+	layers, _ := table.Match("GET", "/x")
+	if len(layers) != 3 {
+		t.Fatalf("matched %d layers, want 3", len(layers))
+	}
+	if layers[0].Fn == nil || layers[1].Fn == nil {
+		t.Fatal("expected callables")
+	}
+	v, err := layers[0].Fn(sobek.Undefined())
+	if err != nil || v.ToInteger() != 1 {
+		t.Fatalf("first layer = %v, %v", v, err)
+	}
+	v, err = layers[1].Fn(sobek.Undefined())
+	if err != nil || v.ToInteger() != 2 {
+		t.Fatalf("second layer = %v, %v", v, err)
+	}
+}
+
+func TestNoLayersMatchesNothing(t *testing.T) {
+	table := New()
+	if got, _ := table.Match("GET", "/"); len(got) != 0 {
+		t.Fatalf("empty table matched %d layers", len(got))
 	}
 }

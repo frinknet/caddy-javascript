@@ -20,20 +20,29 @@ RUN case "${TARGETARCH}" in \
 # ---------------------------------------------------------------------------
 # Stage B: Build caddy binary. Source-dependent, uses shared go cache.
 # ---------------------------------------------------------------------------
-WORKDIR /build
-COPY . /src/caddy-javascript
+WORKDIR /src
+
+# cache the module downloads separately from the source
+COPY go.mod go.sum ./
+RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+
+# pick up any newly uncommented imports
+RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
+    go mod tidy
 
 RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
     --mount=type=cache,id=gobuild,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux \
     xcaddy build \
     --with github.com/frinknet/caddy-javascript \
-    --replace github.com/frinknet/caddy-javascript=/src/caddy-javascript \
+    --replace github.com/frinknet/caddy-javascript=/src \
     --output /out/caddy \
     && upx --best --lzma /out/caddy
 
-# Collect licenses and the resolved version list from the *uncompressed*
-# binary: upx strips the Go build info, so this must run before compression.
+# collect the licenses of caddy and every plugin linked into the binary
 RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
     sh -euxc ' \
       GOMODCACHE=$(go env GOMODCACHE); \
@@ -70,11 +79,10 @@ COPY --from=build /out/caddy               /bin/caddy
 COPY --from=build /out/toybox              /bin/toybox
 COPY             www                       /srv/www
 
+# populate toybox
 RUN ["/bin/toybox", "sh", "-c", "cd /bin && for i in $(./toybox); do if [ \"$i\" != toybox ]; then ./toybox ln -s toybox \"$i\"; fi; done && test -L /bin/sh && test -L /bin/ls"]
 RUN mkdir -p /etc/caddy /var/lib/caddy /var/cache/caddy /tmp && chmod 1777 /tmp
 RUN mv /srv/www/Caddyfile /etc/caddy/Caddyfile
-
-VOLUME ["/var/lib/caddy"]
 
 ENV PATH="/bin:/usr/bin:/usr/local/bin"
 ENV XDG_CONFIG_HOME="/etc/caddy"
@@ -90,4 +98,4 @@ EXPOSE 80 443 443/udp
 
 WORKDIR /srv/www
 ENTRYPOINT ["/bin/caddy"]
-CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+CMD ["run"]

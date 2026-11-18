@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"errors"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -117,16 +118,15 @@ func TestExchangeStaysOpenForAsync(t *testing.T) {
 	rec := httptest.NewRecorder()
 	w := NewResponseWriter(rec)
 	ex := NewExchange(w)
-	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/x"})
+	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/x"}, nil)
 	resObj := p.BuildResponse(w)
 
-	handler := p.Lookup("GET", "/x")
-	if handler == nil {
+	layers, _ := p.Match("GET", "/x")
+	if len(layers) == 0 {
 		t.Fatal("route not registered")
 	}
 	if err := p.Serve(ex, time.Second, func() error {
-		_, e := handler(sobek.Undefined(), reqObj, resObj)
-		return e
+		return p.RunChain(ex, layers, reqObj, resObj)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestRequestContextBodyParsing(t *testing.T) {
 		Query:   map[string][]string{"x": {"1", "2"}},
 	}
 
-	obj := p.BuildRequest(rc)
+	obj := p.BuildRequest(rc, nil)
 	if got := obj.Get("method").String(); got != "POST" {
 		t.Fatalf("method = %q", got)
 	}
@@ -268,5 +268,244 @@ func TestEncodeBody(t *testing.T) {
 	body, contentType = encodeBody(p.rt.ToValue(map[string]interface{}{"a": 1}))
 	if string(body) != `{"a":1}` || contentType != "application/json; charset=utf-8" {
 		t.Fatalf("object: %q %q", body, contentType)
+	}
+}
+
+func serveScript(t *testing.T, script, method, path string, sched *fakeScheduler) (*httptest.ResponseRecorder, error) {
+	t.Helper()
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, sched, nil)
+	if err := p.Load([]byte(script)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	w := NewResponseWriter(rec)
+	ex := NewExchange(w)
+	layers, params := p.Match(method, path)
+	if len(layers) == 0 {
+		t.Fatalf("no layers matched %s %s", method, path)
+	}
+	reqObj := p.BuildRequest(&RequestContext{Method: method, Path: path}, params)
+	resObj := p.BuildResponse(w)
+
+	serveErr := p.Serve(ex, time.Second, func() error {
+		return p.RunChain(ex, layers, reqObj, resObj)
+	})
+	if serveErr != nil {
+		t.Fatalf("serve: %v", serveErr)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sched != nil {
+			sched.run()
+		}
+		select {
+		case <-ex.Done:
+			return rec, ex.Err()
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("exchange did not finish")
+	return nil, nil
+}
+
+func TestChainRunsMiddlewareInOrder(t *testing.T) {
+	rec, err := serveScript(t, `
+		var order = []
+		app.use(function(req, res, next) { order.push('a'); next() })
+		app.use(function(req, res, next) { order.push('b'); next() })
+		app.get('/x', function(req, res) { res.send(order.join(',')) })
+	`, "GET", "/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "a,b" {
+		t.Fatalf("body = %q, want a,b", got)
+	}
+}
+
+func TestRouteMiddlewareRunsBeforeHandler(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/y',
+			function(req, res, next) { res.set('X-MW', 'yes'); next() },
+			function(req, res) { res.send('done') })
+	`, "GET", "/y", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Header().Get("X-MW"); got != "yes" {
+		t.Fatalf("X-MW = %q, want yes", got)
+	}
+	if got := rec.Body.String(); got != "done" {
+		t.Fatalf("body = %q, want done", got)
+	}
+}
+
+func TestNextErrorReachesErrorHandler(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/boom', function(req, res, next) { next(new Error('kaboom')) })
+		app.use(function(err, req, res, next) { res.status(503).send('handled: ' + err.message) })
+	`, "GET", "/boom", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Code; got != 503 {
+		t.Fatalf("status = %d, want 503", got)
+	}
+	if got := rec.Body.String(); got != "handled: kaboom" {
+		t.Fatalf("body = %q", got)
+	}
+}
+
+func TestThrownErrorReachesErrorHandler(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/throw', function(req, res) { throw new Error('thrown') })
+		app.use(function(err, req, res, next) { res.status(500).send('caught ' + err.message) })
+	`, "GET", "/throw", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "caught thrown" {
+		t.Fatalf("body = %q", got)
+	}
+}
+
+func TestUnhandledErrorIsReportedOnExchange(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/unhandled', function(req, res) { throw new Error('nope') })
+	`, "GET", "/unhandled", nil)
+	if err == nil {
+		t.Fatal("expected an error on the exchange")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty", rec.Body.String())
+	}
+}
+
+func TestParamsAndWildcard(t *testing.T) {
+	script := `
+		app.get('/users/:id', function(req, res) { res.json(req.params) })
+		app.get('/files/*', function(req, res) { res.send(String(req.params[0])) })
+	`
+	rec, err := serveScript(t, script, "GET", "/users/42", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != `{"id":"42"}` {
+		t.Fatalf("params body = %q", got)
+	}
+
+	rec, err = serveScript(t, script, "GET", "/files/a/b.txt", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "a/b.txt" {
+		t.Fatalf("wildcard body = %q", got)
+	}
+}
+
+func TestExpressShimAndExtraMethods(t *testing.T) {
+	script := `
+		const express = require('express')
+		const a = express()
+		a.put('/p', function(req, res) { res.send('put') })
+		a.delete('/d', function(req, res) { res.send('delete') })
+		a.all('/any', function(req, res) { res.send(req.method) })
+		a.listen(3000)
+	`
+	rec, err := serveScript(t, script, "PUT", "/p", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "put" {
+		t.Fatalf("put body = %q", got)
+	}
+
+	rec, err = serveScript(t, script, "DELETE", "/d", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "delete" {
+		t.Fatalf("delete body = %q", got)
+	}
+
+	rec, err = serveScript(t, script, "GET", "/any", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "GET" {
+		t.Fatalf("all body = %q", got)
+	}
+}
+
+func TestUnknownAppMethodFailsLoudly(t *testing.T) {
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, nil, nil)
+	if err := p.Load([]byte(`app.nope()`)); err == nil {
+		t.Fatal("expected app.nope() to throw")
+	}
+}
+
+func TestChainReportsInterrupt(t *testing.T) {
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, nil, nil)
+	if err := p.Load([]byte(`app.get('/spin', function(req, res) { while (true) {} })`)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	w := NewResponseWriter(rec)
+	ex := NewExchange(w)
+	layers, params := p.Match("GET", "/spin")
+	if len(layers) == 0 {
+		t.Fatal("route not registered")
+	}
+	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/spin"}, params)
+	resObj := p.BuildResponse(w)
+
+	err = p.Serve(ex, 50*time.Millisecond, func() error {
+		return p.RunChain(ex, layers, reqObj, resObj)
+	})
+	var interrupted *sobek.InterruptedError
+	if !errors.As(err, &interrupted) {
+		t.Fatalf("err = %v, want an InterruptedError", err)
+	}
+	if w.Written() {
+		t.Fatal("an interrupted handler should not write")
+	}
+	if ex.Err() != nil {
+		t.Fatalf("interrupt reported as a handler error: %v", ex.Err())
+	}
+}
+
+func TestAsyncNextAdvancesChain(t *testing.T) {
+	sched := &fakeScheduler{}
+	rec, err := serveScript(t, `
+		app.get('/async-next', function(req, res, next) { setTimeout(next, 0) })
+		app.get('/async-next', function(req, res) { res.send('after') })
+	`, "GET", "/async-next", sched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "after" {
+		t.Fatalf("body = %q, want after", got)
 	}
 }

@@ -23,31 +23,74 @@ func (p *Program) registerEnvironment() {
 func (p *Program) registerApp() {
 	app := p.rt.NewObject()
 
-	app.Set("get", p.routeSetter("GET"))
-	app.Set("post", p.routeSetter("POST"))
+	for _, method := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} {
+		_ = app.Set(strings.ToLower(method), p.routeSetter(method))
+	}
+	_ = app.Set("all", p.routeSetter(""))
 
-	app.Set("use", func(call sobek.FunctionCall) sobek.Value {
-		fn, ok := sobek.AssertFunction(call.Argument(0))
-		if !ok {
-			panic(p.rt.NewTypeError("app.use requires a function"))
+	_ = app.Set("use", func(call sobek.FunctionCall) sobek.Value {
+		path := ""
+		start := 0
+		if len(call.Arguments) > 1 {
+			if _, ok := sobek.AssertFunction(call.Argument(0)); !ok {
+				path = call.Argument(0).String()
+				start = 1
+			}
 		}
-		p.routes.SetFallback(fn)
+		for _, h := range p.handlers(call, start, "app.use") {
+			p.routes.Use(path, h.fn, h.arity)
+		}
 		return sobek.Undefined()
 	})
 
+	_ = app.Set("listen", func(call sobek.FunctionCall) sobek.Value {
+		return app
+	})
+
+	p.appObj = app
 	p.rt.Set("app", app)
 }
 
 func (p *Program) routeSetter(method string) func(sobek.FunctionCall) sobek.Value {
+	name := "app." + strings.ToLower(method)
+	if method == "" {
+		name = "app.all"
+	}
 	return func(call sobek.FunctionCall) sobek.Value {
 		path := call.Argument(0).String()
-		fn, ok := sobek.AssertFunction(call.Argument(1))
-		if !ok {
-			panic(p.rt.NewTypeError("app.%s requires a function", strings.ToLower(method)))
+		for _, h := range p.handlers(call, 1, name) {
+			p.routes.Add(method, path, h.fn, h.arity)
 		}
-		p.routes.Add(method, path, fn)
 		return sobek.Undefined()
 	}
+}
+
+type jsHandler struct {
+	fn    sobek.Callable
+	arity int
+}
+
+func (p *Program) handlers(call sobek.FunctionCall, start int, name string) []jsHandler {
+	out := make([]jsHandler, 0, len(call.Arguments)-start)
+	for i := start; i < len(call.Arguments); i++ {
+		fn, ok := sobek.AssertFunction(call.Argument(i))
+		if !ok {
+			panic(p.rt.NewTypeError("%s requires a function", name))
+		}
+		out = append(out, jsHandler{fn: fn, arity: functionArity(p.rt, call.Argument(i))})
+	}
+	if len(out) == 0 {
+		panic(p.rt.NewTypeError("%s requires a function", name))
+	}
+	return out
+}
+
+func functionArity(rt *sobek.Runtime, v sobek.Value) int {
+	obj := v.ToObject(rt)
+	if obj == nil {
+		return 0
+	}
+	return int(obj.Get("length").ToInteger())
 }
 
 func (p *Program) registerProcess() {
@@ -84,6 +127,10 @@ func (p *Program) registerRequire() {
 			return p.fsObj
 		case "path", "node:path":
 			return p.pathObj
+		case "express":
+			return p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
+				return p.appObj
+			})
 		default:
 			panic(p.rt.NewGoError(fmt.Errorf("module not supported in caddy-javascript: %s", call.Argument(0).String())))
 		}

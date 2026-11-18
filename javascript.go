@@ -181,7 +181,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		http.Error(w, "Not Found", http.StatusNotFound)
 	} else if !srw.Written() {
-		http.Error(w, "Not Found", http.StatusNotFound)
+		if err := ex.Err(); err != nil {
+			h.logger.Error("javascript: handler error",
+				zap.Error(err),
+				zap.String("method", rc.Method),
+				zap.String("path", rc.Path),
+			)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		} else {
+			http.Error(w, "Not Found", http.StatusNotFound)
+		}
 	}
 
 	metricRequests.WithLabelValues(strconv.Itoa(srw.Status())).Inc()
@@ -199,8 +208,8 @@ func (h *Handler) serve(ex *bridge.Exchange, rc *bridge.RequestContext) {
 		return
 	}
 
-	handler := prog.Lookup(rc.Method, rc.Path)
-	if handler == nil {
+	layers, params := prog.Match(rc.Method, rc.Path)
+	if len(layers) == 0 {
 		if h.Fallthrough {
 			ex.Finish()
 			return
@@ -212,12 +221,11 @@ func (h *Handler) serve(ex *bridge.Exchange, rc *bridge.RequestContext) {
 	}
 
 	ex.SetHandled(true)
-	reqObj := prog.BuildRequest(rc)
+	reqObj := prog.BuildRequest(rc, params)
 	resObj := prog.BuildResponse(w)
 
 	err := prog.Serve(ex, time.Duration(h.Timeout), func() error {
-		_, e := handler(sobek.Undefined(), reqObj, resObj)
-		return e
+		return prog.RunChain(ex, layers, reqObj, resObj)
 	})
 
 	if err != nil {

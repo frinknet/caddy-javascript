@@ -1,0 +1,109 @@
+[
+  {
+    "name": "require('express') factory registers a route",
+    "method": "GET",
+    "path": "/express/hello",
+    "wantStatus": 200,
+    "wantBodyEquals": "express hello"
+  },
+  {
+    "name": "app.put matches a PUT request",
+    "method": "PUT",
+    "path": "/express/put",
+    "wantStatus": 200,
+    "wantBodyEquals": "put ok"
+  },
+  {
+    "name": "app.delete matches a DELETE request",
+    "method": "DELETE",
+    "path": "/express/delete",
+    "wantStatus": 200,
+    "wantBodyEquals": "delete ok"
+  },
+  {
+    "name": "app.all matches every method",
+    "method": "GET",
+    "path": "/express/any",
+    "wantStatus": 200,
+    "wantBodyEquals": "GET"
+  },
+  {
+    "name": "app.all matches POST",
+    "method": "POST",
+    "path": "/express/any",
+    "wantStatus": 200,
+    "wantBodyEquals": "POST"
+  },
+  {
+    "name": "app.head matches a HEAD request",
+    "method": "HEAD",
+    "path": "/express/head",
+    "wantStatus": 200,
+    "wantHeaders": { "X-Head": "yes" }
+  },
+  {
+    "name": "mounted middleware runs before the route",
+    "method": "GET",
+    "path": "/mw/hello",
+    "wantStatus": 200,
+    "wantBodyEquals": "mw hello",
+    "wantHeaders": { "X-MW": "yes" }
+  },
+  {
+    "name": "route middleware runs before its handler",
+    "method": "GET",
+    "path": "/mw/route",
+    "wantStatus": 200,
+    "wantBodyEquals": "route mw",
+    "wantHeaders": { "X-Route-MW": "1" }
+  },
+  {
+    "name": "path parameter is captured",
+    "method": "GET",
+    "path": "/users/42",
+    "wantStatus": 200,
+    "wantContentType": "application/json",
+    "wantBodyEquals": "{\"id\":\"42\"}"
+  },
+  {
+    "name": "two path parameters are captured",
+    "method": "GET",
+    "path": "/users/42/posts/7",
+    "wantStatus": 200,
+    "wantBodyEquals": "{\"id\":\"42\",\"post\":\"7\"}"
+  },
+  {
+    "name": "wildcard captures the rest of the path",
+    "method": "GET",
+    "path": "/files/a/b.txt",
+    "wantStatus": 200,
+    "wantBodyEquals": "a/b.txt"
+  },
+  {
+    "name": "next(err) reaches the error handler",
+    "method": "GET",
+    "path": "/boom",
+    "wantStatus": 503,
+    "wantBodyEquals": "handled: kaboom"
+  },
+  {
+    "name": "an unhandled throw is a 500",
+    "method": "GET",
+    "path": "/throw",
+    "wantStatus": 500
+  },
+  {
+    "name": "matching is case-insensitive",
+    "method": "GET",
+    "path": "/Hello",
+    "wantStatus": 200,
+    "wantBodyEquals": "hello world"
+  },
+  {
+    "name": "matching ignores a trailing slash",
+    "method": "GET",
+    "path": "/hello/",
+    "wantStatus": 200,
+    "wantBodyEquals": "hello world"
+  }
+]

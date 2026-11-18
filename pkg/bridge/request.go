@@ -88,11 +88,12 @@ func urlValues(values url.Values) map[string]interface{} {
 	return out
 }
 
-func (p *Program) BuildRequest(rc *RequestContext) *sobek.Object {
+func (p *Program) BuildRequest(rc *RequestContext, params map[string]string) *sobek.Object {
 	req := p.rt.NewObject()
 	_ = req.Set("path", rc.Path)
 	_ = req.Set("method", rc.Method)
 	_ = req.Set("host", rc.Host)
+	_ = req.Set("params", p.stringsObject(params))
 	_ = req.Set("headers", p.stringsObject(firstValues(rc.Headers)))
 	_ = req.Set("query", p.stringsObject(firstValues(rc.Query)))
 	_ = req.Set("queryAll", p.arraysObject(rc.Query))
