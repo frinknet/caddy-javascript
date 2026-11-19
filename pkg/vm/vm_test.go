@@ -35,7 +35,7 @@ export default function handler(http) {
 	}
 	defer v.Close()
 
-	resp, err := v.Handle(context.Background(), Request{Method: "GET", Path: "/hello"})
+	resp, err := v.Handle(context.Background(), entry, Request{Method: "GET", Path: "/hello"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestHandleWithoutResponse(t *testing.T) {
 	}
 	defer v.Close()
 
-	resp, err := v.Handle(context.Background(), Request{Method: "GET", Path: "/"})
+	resp, err := v.Handle(context.Background(), entry, Request{Method: "GET", Path: "/"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -102,16 +102,90 @@ func TestHandleTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	_, err = v.Handle(ctx, Request{Method: "GET", Path: "/spin"})
+	_, err = v.Handle(ctx, entry, Request{Method: "GET", Path: "/spin"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Handle error = %v, want deadline exceeded", err)
 	}
 
-	resp, err := v.Handle(context.Background(), Request{Method: "GET", Path: "/ok"})
+	resp, err := v.Handle(context.Background(), entry, Request{Method: "GET", Path: "/ok"})
 	if err != nil {
 		t.Fatalf("Handle after timeout: %v", err)
 	}
 	if resp == nil || string(resp.Body) != "ok" {
 		t.Fatalf("response after timeout = %+v", resp)
+	}
+}
+
+func TestLoadSharesRealmAndModules(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "lib.js", `let n = 0
+export function next() { return ++n }
+`)
+	entry := writeModule(t, dir, "site.js", `import { next } from "./lib.js"
+globalThis.site = (globalThis.site ?? 0) + 1
+export default function handler(http) {
+	http.respond(200, {}, "site=" + globalThis.site + " lib=" + next())
+}
+`)
+	api := writeModule(t, dir, "api.js", `import { next } from "./lib.js"
+export default function handler(http) {
+	http.respond(200, {}, "api=" + globalThis.site + " lib=" + next())
+}
+`)
+
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	if err := v.Load(context.Background(), api); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	resp, err := v.Handle(context.Background(), entry, Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("site Handle: %v", err)
+	}
+	if got := string(resp.Body); got != "site=1 lib=1" {
+		t.Errorf("site body = %q", got)
+	}
+
+	resp, err = v.Handle(context.Background(), api, Request{Method: "GET", Path: "/api"})
+	if err != nil {
+		t.Fatalf("api Handle: %v", err)
+	}
+	if got := string(resp.Body); got != "api=1 lib=2" {
+		t.Errorf("api body = %q", got)
+	}
+}
+
+func TestProvisionDeadline(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `while (true) {}
+export default function handler(http) {}
+`)
+	start := time.Now()
+	_, err := New(Config{
+		ScriptPath:       entry,
+		RootDir:          dir,
+		RequireHandler:   true,
+		ProvisionTimeout: 50 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("New accepted a module that never finishes provisioning")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("provision deadline took %s", elapsed)
+	}
+}
+
+func TestTopLevelAwaitRejectionFailsProvisioning(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `await Promise.reject(new Error("nope"))
+export default function handler(http) {}
+`)
+	if _, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true}); err == nil {
+		t.Fatal("New accepted a module whose top-level await rejected")
 	}
 }

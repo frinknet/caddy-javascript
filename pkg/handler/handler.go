@@ -84,6 +84,8 @@ type Handler struct {
 	config.Options
 
 	vm      *vm.VM
+	site    *siteRef
+	script  string
 	logger  *zap.Logger
 	timeout time.Duration
 }
@@ -105,27 +107,53 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return err
 	}
-	v, err := vm.New(vm.Config{
-		ScriptPath:     script,
-		RootDir:        root,
-		Memory:         h.Memory,
-		QueueSize:      h.QueueSize,
-		RequireHandler: true,
-		Logger:         h.logger,
-	})
+	h.script = script
+	h.timeout = time.Duration(h.Timeout)
+
+	cfg := vm.Config{
+		ScriptPath:       script,
+		RootDir:          root,
+		Memory:           h.Memory,
+		QueueSize:        h.QueueSize,
+		RequireHandler:   true,
+		ProvisionTimeout: vm.DefaultProvisionTimeout,
+		Logger:           h.logger,
+	}
+
+	if site, ok := h.bindSite(ctx); ok {
+		provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
+		defer cancel()
+		v, err := site.gen.join(provisionCtx, site.key, cfg)
+		if err != nil {
+			site.gen.discard(site.srv)
+			return err
+		}
+		h.vm = v
+		h.site = &site
+		return nil
+	}
+
+	v, err := vm.New(cfg)
 	if err != nil {
 		return err
 	}
 	h.vm = v
-	h.timeout = time.Duration(h.Timeout)
 	return nil
 }
 
 func (h *Handler) Cleanup() error {
-	if h.vm == nil {
+	if h.site != nil {
+		site := h.site
+		h.site = nil
+		h.vm = nil
+		return site.gen.release(site.srv, site.key)
+	}
+	v := h.vm
+	h.vm = nil
+	if v == nil {
 		return nil
 	}
-	return h.vm.Close()
+	return v.Close()
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -137,7 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 
-	resp, err := h.vm.Handle(ctx, vm.Request{Method: r.Method, Path: r.URL.Path})
+	resp, err := h.vm.Handle(ctx, h.script, vm.Request{Method: r.Method, Path: r.URL.Path})
 	if err != nil {
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
 			return r.Context().Err()

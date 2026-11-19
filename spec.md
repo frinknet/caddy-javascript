@@ -1,7 +1,9 @@
 # Technical Specification: Caddy JavaScript Runtime
 
-Status: target design. The first runtime slice is implemented: a per-directive
-go-quickjs VM, ESM evaluation with a sandboxed loader, and a minimal `http`
+Status: target design. Implemented today: one go-quickjs VM per site per
+configuration generation, joined by the site entry and its handle directives;
+ESM evaluation with a sandboxed loader and a provision deadline; a generation
+registry keyed by host matcher set or explicit `site`; and a minimal `http`
 object. The rest of this file is the target. `README.md` documents what runs
 today.
 

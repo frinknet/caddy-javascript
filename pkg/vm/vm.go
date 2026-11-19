@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	DefaultMemory    = int64(64 << 20)
-	DefaultQueueSize = 256
+	DefaultMemory           = int64(64 << 20)
+	DefaultQueueSize        = 256
+	DefaultProvisionTimeout = 10 * time.Second
 )
 
 var (
@@ -29,12 +30,13 @@ var (
 )
 
 type Config struct {
-	ScriptPath     string
-	RootDir        string
-	Memory         int64
-	QueueSize      int
-	RequireHandler bool
-	Logger         *zap.Logger
+	ScriptPath       string
+	RootDir          string
+	Memory           int64
+	QueueSize        int
+	RequireHandler   bool
+	ProvisionTimeout time.Duration
+	Logger           *zap.Logger
 }
 
 type Request struct {
@@ -49,10 +51,14 @@ type Response struct {
 }
 
 type VM struct {
-	rt    *quickjs.Runtime
-	loop  *stdlib.Loop
-	root  *os.Root
-	entry quickjs.Value
+	rt      *quickjs.Runtime
+	loop    *stdlib.Loop
+	root    *os.Root
+	sandbox *sandbox
+
+	mu             sync.RWMutex
+	entries        map[string]quickjs.Value
+	requireHandler bool
 
 	slots  chan struct{}
 	closed chan struct{}
@@ -134,7 +140,14 @@ func New(cfg Config) (*VM, error) {
 		return string(src), name, nil
 	})
 
-	ns, err := rt.EvalModule(entryName, string(src))
+	provisionTimeout := cfg.ProvisionTimeout
+	if provisionTimeout <= 0 {
+		provisionTimeout = DefaultProvisionTimeout
+	}
+	provisionCtx, cancelProvision := context.WithTimeout(context.Background(), provisionTimeout)
+	defer cancelProvision()
+
+	ns, err := rt.EvalModuleContext(provisionCtx, entryName, string(src))
 	if err != nil {
 		rt.Close()
 		root.Close()
@@ -154,14 +167,16 @@ func New(cfg Config) (*VM, error) {
 	}
 
 	v := &VM{
-		rt:     rt,
-		loop:   loop,
-		root:   root,
-		entry:  entry,
-		slots:  make(chan struct{}, cfg.QueueSize),
-		closed: make(chan struct{}),
-		done:   make(chan struct{}),
-		logger: cfg.Logger,
+		rt:             rt,
+		loop:           loop,
+		root:           root,
+		sandbox:        sb,
+		entries:        map[string]quickjs.Value{script: entry},
+		requireHandler: cfg.RequireHandler,
+		slots:          make(chan struct{}, cfg.QueueSize),
+		closed:         make(chan struct{}),
+		done:           make(chan struct{}),
+		logger:         cfg.Logger,
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
 	loop.Begin()
@@ -181,9 +196,16 @@ func (v *VM) run() {
 	_ = v.root.Close()
 }
 
-func (v *VM) Handle(ctx context.Context, req Request) (*Response, error) {
+func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Response, error) {
 	if err := v.err(); err != nil {
 		return nil, err
+	}
+
+	v.mu.RLock()
+	entry, ok := v.entries[scriptPath]
+	v.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("javascript: module %q is not loaded", scriptPath)
 	}
 
 	select {
@@ -206,7 +228,7 @@ func (v *VM) Handle(ctx context.Context, req Request) (*Response, error) {
 			"path":    req.Path,
 			"respond": resp.respond,
 		}
-		_, err := v.entry.CallContext(ctx, http)
+		_, err := entry.CallContext(ctx, http)
 		ch <- result{resp: resp.finish(), err: err}
 	})
 
@@ -222,6 +244,65 @@ func (v *VM) Handle(ctx context.Context, req Request) (*Response, error) {
 			return nil, err
 		}
 		return nil, ErrClosed
+	}
+}
+
+func (v *VM) Load(ctx context.Context, scriptPath string) error {
+	script, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return fmt.Errorf("javascript: script path: %w", err)
+	}
+
+	v.mu.RLock()
+	_, loaded := v.entries[script]
+	v.mu.RUnlock()
+	if loaded {
+		return nil
+	}
+
+	if err := v.err(); err != nil {
+		return err
+	}
+
+	name, err := v.sandbox.name(script)
+	if err != nil {
+		return err
+	}
+	src, err := v.sandbox.read(name)
+	if err != nil {
+		return err
+	}
+
+	ch := make(chan error, 1)
+	v.loop.Post(func() {
+		ns, err := v.rt.EvalModuleContext(ctx, name, string(src))
+		if err != nil {
+			ch <- fmt.Errorf("javascript: evaluate %s: %w", name, err)
+			return
+		}
+		entry, err := ns.Get("default")
+		if err != nil {
+			ch <- fmt.Errorf("javascript: read default export: %w", err)
+			return
+		}
+		if v.requireHandler && !entry.IsFunction() {
+			ch <- fmt.Errorf("javascript: %s must export a default function", name)
+			return
+		}
+		v.mu.Lock()
+		v.entries[script] = entry
+		v.mu.Unlock()
+		ch <- nil
+	})
+
+	select {
+	case err := <-ch:
+		return err
+	case <-v.done:
+		if err := v.runError(); err != nil {
+			return err
+		}
+		return ErrClosed
 	}
 }
 

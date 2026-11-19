@@ -37,7 +37,8 @@ cp -R test/app "$TMP/app" || exit 1
 
 cat >"$TMP/Caddyfile" <<'CADDY'
 {
-	admin off
+	admin 127.0.0.1:2019
+	persist_config off
 	javascript /app/global.js
 }
 
@@ -46,6 +47,15 @@ cat >"$TMP/Caddyfile" <<'CADDY'
 		timeout 2s
 		memory 67108864
 		queue_size 8
+	}
+}
+
+http://shared.example:80 {
+	handle /site/* {
+		javascript /app/shared-site.js
+	}
+	handle /api/* {
+		javascript /app/shared-api.js
 	}
 }
 CADDY
@@ -71,6 +81,7 @@ docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 if ! docker run -d \
 	--name "$CONTAINER_NAME" \
 	-v "$TMP/Caddyfile:/etc/caddy/Caddyfile:ro" \
+	-v "$TMP:/test:ro" \
 	-v "$TMP/app:/app" \
 	-p "127.0.0.1:$PORT:80" \
 	"$IMAGE" run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
@@ -97,7 +108,7 @@ if [ "$ready" -ne 1 ]; then
 	exit 1
 fi
 
-# check NAME METHOD PATH [--status N] [--equals BODY] [--contains TEXT]
+# check NAME METHOD PATH [--status N] [--equals BODY] [--contains TEXT] [--host NAME]
 check() {
 	check_name=$1
 	check_method=$2
@@ -108,6 +119,7 @@ check() {
 	check_equals=
 	check_have_equals=0
 	check_contains=
+	check_host=
 
 	while [ "$#" -gt 0 ]; do
 		case $1 in
@@ -124,6 +136,10 @@ check() {
 			check_contains=$2
 			shift 2
 			;;
+		--host)
+			check_host=$2
+			shift 2
+			;;
 		*)
 			echo "check: unknown option $1" >&2
 			exit 2
@@ -132,9 +148,17 @@ check() {
 	done
 
 	if [ "$check_method" = HEAD ]; then
-		check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -I "$BASE$check_path" 2>"$REQ/curl-err")
+		if [ -n "$check_host" ]; then
+			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -I "$BASE$check_path" 2>"$REQ/curl-err")
+		else
+			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -I "$BASE$check_path" 2>"$REQ/curl-err")
+		fi
 	else
-		check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
+		if [ -n "$check_host" ]; then
+			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
+		else
+			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
+		fi
 	fi
 	check_bad=0
 
@@ -169,6 +193,9 @@ echo "=== Test 1: site runtime ==="
 check "site handler runs the entry module" GET / --status 200 --equals 'GET /'
 check "site handler sees the method and path" POST /anything --status 200 --equals 'POST /anything'
 check "global and site entries provision together" GET /again --status 200 --equals 'GET /again'
+
+check "site handlers share one VM" GET /site/one --host shared.example --status 200 --equals 'site=1 lib=1'
+check "handle directives share the site realm and module cache" GET /api/two --host shared.example --status 200 --equals 'api=1 lib=2'
 
 echo ""
 echo "=== Test 2: configuration validation ==="
@@ -305,6 +332,48 @@ neg "queue_size floor fails" "$TMP/neg-queue.Caddyfile" 'queue_size must be at l
 neg "missing script file fails" "$TMP/neg-missing-script.Caddyfile" 'no such file'
 neg "missing global script fails" "$TMP/neg-global-script.Caddyfile" 'no such file'
 neg "duplicate global option fails" "$TMP/neg-duplicate-global.Caddyfile" 'may only be set once'
+
+echo ""
+echo "=== Test 3: reload rollback ==="
+
+cat >"$TMP/reload-good.Caddyfile" <<'CADDY'
+{
+	admin 127.0.0.1:2019
+	persist_config off
+}
+:80 {
+	javascript /app/reload.js
+}
+CADDY
+
+cat >"$TMP/reload-broken.Caddyfile" <<'CADDY'
+{
+	admin 127.0.0.1:2019
+	persist_config off
+}
+:80 {
+	javascript /app/broken.js
+}
+CADDY
+
+if docker exec "$CONTAINER_NAME" caddy reload --config /test/reload-good.Caddyfile --adapter caddyfile >"$REQ/reload-out" 2>&1; then
+	echo "  PASS: reload activates the new generation"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: reload rejected a valid configuration"
+	sed 's/^/    /' "$REQ/reload-out"
+	FAIL=$((FAIL + 1))
+fi
+check "reloaded generation serves the new module" GET / --status 200 --equals 'reloaded'
+
+if docker exec "$CONTAINER_NAME" caddy reload --config /test/reload-broken.Caddyfile --adapter caddyfile >"$REQ/reload-out" 2>&1; then
+	echo "  FAIL: reload accepted a module with a syntax error"
+	FAIL=$((FAIL + 1))
+else
+	echo "  PASS: broken reload is rejected"
+	PASS=$((PASS + 1))
+fi
+check "broken reload keeps the previous generation serving" GET / --status 200 --equals 'reloaded'
 
 echo ""
 echo "=========================================="

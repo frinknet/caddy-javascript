@@ -3,18 +3,26 @@
 Run ESM JavaScript inside Caddy as a native runtime. The target design is in
 [`spec.md`](spec.md).
 
-**Status: first runtime slice.** A site directive now creates a real
-[go-quickjs](https://github.com/go-quickjs/go-quickjs) VM, evaluates the entry
-module once, and dispatches each request to its default export. The global
-option evaluates a worker entry but does not dispatch requests. Workers,
-messaging, `server`, `_`, vars, events, fetch, and filesystem access are not
-implemented yet.
+**Status: one VM per site.** A site block creates one
+[go-quickjs](https://github.com/go-quickjs/go-quickjs) VM per configuration
+generation; its top-level directives and its `handle` directives share that VM's
+realm, module cache, and entry modules. The global option evaluates a worker
+entry but does not dispatch requests. Workers, messaging, `server`, `_`, vars,
+events, fetch, and filesystem access are not implemented yet.
 
 ## What works today
 
-- The `javascript` global option provisions a VM and evaluates its entry module.
-- The `javascript` HTTP directive provisions a site VM. The entry module must
-  export a default function: `export default function handler(http) { ... }`.
+- The `javascript` global option provisions a worker VM and evaluates its entry
+  module.
+- The `javascript` HTTP directive joins the VM of its enclosing site. The entry
+  module must export a default function:
+  `export default function handler(http) { ... }`.
+- Directives in the same site block share one VM, keyed by the site's host
+  matcher set. An explicit `site` name overrides that discovery. Provisioning
+  order does not matter, and a module imported by two directives is evaluated
+  once.
+- The site VM belongs to one configuration generation. A reload provisions a
+  new registry and new VMs; an old generation never shares a VM with a new one.
 - ESM imports resolve inside `root`. Bare specifiers, npm, CommonJS, and paths
   outside the root are rejected.
 - Each request gets a fresh `http` object with `method`, `path`, and
@@ -25,11 +33,12 @@ implemented yet.
 - `timeout` interrupts a runaway handler and answers `504`. A full per-VM queue
   answers `503`. A thrown exception answers `500`.
 - `memory` and `queue_size` are active. A reload closes the old VMs.
-- Each `javascript` directive owns one VM for now. Sharing one VM across a
-  site's handle directives is the next step.
+- Entry evaluation has a provision deadline. A syntax error, a rejected
+  top-level await, or a runaway module fails the configuration load, so the
+  previous generation keeps serving.
 
-Parsed but not active yet: `site`, `env_allow`, `fetch_allow`, and `watch`.
-`root`, `timeout`, `memory`, `queue_size`, and `fallthrough` are active.
+Parsed but not active yet: `env_allow`, `fetch_allow`, and `watch`.
+`site`, `root`, `timeout`, `memory`, `queue_size`, and `fallthrough` are active.
 
 ## Caddyfile
 
@@ -55,7 +64,7 @@ Options are available on both the global option and the directive:
 
 | Option | Meaning | Default |
 |---|---|---|
-| `site <name>` | Explicit site key. Parsed, not active yet. | discovered from the route |
+| `site <name>` | Explicit site key. Overrides host matcher discovery. | discovered from the enclosing route |
 | `root <dir>` | Sandbox root. | entry module's directory |
 | `timeout <duration>` | Deadline for one handler call. | `3s` |
 | `memory <bytes>` | Per-VM memory limit. | `64MiB` |
@@ -117,8 +126,8 @@ checks that invalid configurations fail `caddy validate`.
 - `javascript.go` is the only Go file at the repository root. It blank imports
   the packages that register their modules.
 - `pkg/config` holds the option schema and Caddyfile parsing.
-- `pkg/vm` holds the go-quickjs runtime, sandbox loader, event loop, and
-  per-request dispatch.
+- `pkg/vm` holds the go-quickjs runtime, sandbox loader, event loop, generation
+  registry, and per-request dispatch.
 - `pkg/handler` holds the app, the HTTP handler, and the directive
   registrations.
 - `test/app` holds the e2e fixture modules.

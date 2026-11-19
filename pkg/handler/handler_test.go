@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,5 +158,210 @@ func TestParseGlobal(t *testing.T) {
 	d = caddyfile.NewTestDispenser(`javascript /srv/global.js`)
 	if _, err := parseGlobal(d, app); err == nil {
 		t.Fatal("parseGlobal accepted a duplicate option")
+	}
+}
+
+var javaScriptHandlerRaw = json.RawMessage(`{"handler":"javascript"}`)
+
+func hostMatchers(hosts ...string) caddyhttp.MatcherSets {
+	return caddyhttp.MatcherSets{{caddyhttp.MatchHost(hosts)}}
+}
+
+func serverContext(srv *caddyhttp.Server) caddy.Context {
+	return caddy.Context{Context: context.WithValue(context.Background(), caddyhttp.ServerCtxKey, srv)}
+}
+
+func responseBody(t *testing.T, h *Handler) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	})); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	return rec.Body.String()
+}
+
+func TestSiteHandlersShareOneVM(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "lib.js", "let n = 0\nexport function next() { return ++n }\n")
+	site := writeScript(t, dir, "site.js", `import { next } from "./lib.js"
+globalThis.site = (globalThis.site ?? 0) + 1
+export default function handler(http) {
+	http.respond(200, {}, "site=" + globalThis.site + " lib=" + next())
+}
+`)
+	api := writeScript(t, dir, "api.js", `import { next } from "./lib.js"
+export default function handler(http) {
+	http.respond(200, {}, "api=" + globalThis.site + " lib=" + next())
+}
+`)
+
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{
+		{
+			MatcherSets: hostMatchers("example.com"),
+			HandlersRaw: []json.RawMessage{javaScriptHandlerRaw},
+		},
+		{
+			MatcherSets: caddyhttp.MatcherSets{{
+				caddyhttp.MatchHost{"example.com"},
+				caddyhttp.MatchPath{"/api/*"},
+			}},
+			HandlersRaw: []json.RawMessage{javaScriptHandlerRaw},
+		},
+	}}
+	ctx := serverContext(srv)
+
+	first := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := first.Provision(ctx); err != nil {
+		t.Fatalf("Provision site: %v", err)
+	}
+	defer first.Cleanup()
+	srv.Routes[0].Handlers = []caddyhttp.MiddlewareHandler{first}
+	srv.Routes[0].HandlersRaw = nil
+
+	second := &Handler{Options: config.Options{ScriptPath: api}}
+	if err := second.Provision(ctx); err != nil {
+		t.Fatalf("Provision api: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("site and handle directives own different VMs")
+	}
+	if got := responseBody(t, first); got != "site=1 lib=1" {
+		t.Errorf("site body = %q", got)
+	}
+	if got := responseBody(t, second); got != "api=1 lib=2" {
+		t.Errorf("api body = %q", got)
+	}
+
+	if err := second.Cleanup(); err != nil {
+		t.Fatalf("cleanup api: %v", err)
+	}
+	if got := responseBody(t, first); got != "site=1 lib=3" {
+		t.Errorf("site body after handle cleanup = %q", got)
+	}
+}
+
+func TestDifferentHostsGetDifferentVMs(t *testing.T) {
+	dir := t.TempDir()
+	firstScript := writeScript(t, dir, "first.js", respondScript)
+	secondScript := writeScript(t, dir, "second.js", respondScript)
+
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{
+		{MatcherSets: hostMatchers("one.example"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+		{MatcherSets: hostMatchers("two.example"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+	}}
+	ctx := serverContext(srv)
+
+	first := &Handler{Options: config.Options{ScriptPath: firstScript}}
+	if err := first.Provision(ctx); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+	srv.Routes[0].Handlers = []caddyhttp.MiddlewareHandler{first}
+	srv.Routes[0].HandlersRaw = nil
+
+	second := &Handler{Options: config.Options{ScriptPath: secondScript}}
+	if err := second.Provision(ctx); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm == second.vm {
+		t.Fatal("handlers on different hosts share one VM")
+	}
+}
+
+func TestSiteOptionSharesVMs(t *testing.T) {
+	dir := t.TempDir()
+	firstScript := writeScript(t, dir, "first.js", respondScript)
+	secondScript := writeScript(t, dir, "second.js", respondScript)
+
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{
+		{MatcherSets: hostMatchers("one.example"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+		{MatcherSets: hostMatchers("two.example"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+	}}
+	ctx := serverContext(srv)
+
+	first := &Handler{Options: config.Options{ScriptPath: firstScript, Site: "shared"}}
+	if err := first.Provision(ctx); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+	srv.Routes[0].Handlers = []caddyhttp.MiddlewareHandler{first}
+	srv.Routes[0].HandlersRaw = nil
+
+	second := &Handler{Options: config.Options{ScriptPath: secondScript, Site: "shared"}}
+	if err := second.Provision(ctx); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("site override did not share the VM")
+	}
+}
+
+func TestGenerationsDoNotShareVMs(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "main.js", respondScript)
+
+	newServer := func() *caddyhttp.Server {
+		return &caddyhttp.Server{Routes: caddyhttp.RouteList{
+			{MatcherSets: hostMatchers("example.com"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+		}}
+	}
+	oldServer, newServerInstance := newServer(), newServer()
+
+	oldHandler := &Handler{Options: config.Options{ScriptPath: script}}
+	if err := oldHandler.Provision(serverContext(oldServer)); err != nil {
+		t.Fatalf("Provision old: %v", err)
+	}
+	defer oldHandler.Cleanup()
+
+	newHandler := &Handler{Options: config.Options{ScriptPath: script}}
+	if err := newHandler.Provision(serverContext(newServerInstance)); err != nil {
+		t.Fatalf("Provision new: %v", err)
+	}
+	defer newHandler.Cleanup()
+
+	if oldHandler.vm == newHandler.vm {
+		t.Fatal("two configuration generations share one VM")
+	}
+}
+
+func TestNestedHandlerJoinsEnclosingSite(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", respondScript)
+	api := writeScript(t, dir, "api.js", respondScript)
+
+	subrouteRaw := json.RawMessage(`{"handler":"subroute","routes":[{"handle":[` + string(javaScriptHandlerRaw) + `]}]}`)
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{
+		{MatcherSets: hostMatchers("example.com"), HandlersRaw: []json.RawMessage{subrouteRaw}},
+		{MatcherSets: hostMatchers("example.com"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
+	}}
+	ctx := serverContext(srv)
+
+	nested := &Handler{Options: config.Options{ScriptPath: api}}
+	if err := nested.Provision(ctx); err != nil {
+		t.Fatalf("Provision nested: %v", err)
+	}
+	defer nested.Cleanup()
+	srv.Routes[0].Handlers = []caddyhttp.MiddlewareHandler{
+		&caddyhttp.Subroute{Routes: caddyhttp.RouteList{{Handlers: []caddyhttp.MiddlewareHandler{nested}}}},
+	}
+	srv.Routes[0].HandlersRaw = nil
+
+	top := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := top.Provision(ctx); err != nil {
+		t.Fatalf("Provision top: %v", err)
+	}
+	defer top.Cleanup()
+
+	if nested.vm != top.vm {
+		t.Fatal("nested handler did not join the enclosing site VM")
 	}
 }
