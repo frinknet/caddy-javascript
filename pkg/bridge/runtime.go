@@ -30,6 +30,15 @@ type Config struct {
 	AsyncBudget   int
 	IOConcurrency int
 	Quit          <-chan struct{}
+	// EnqueueJob admits a serialized job to the resident background runtime.
+	// It reports false when the queue is full or the runtime is unavailable.
+	EnqueueJob func(name string, payload []byte, opts JobOptions) (string, bool)
+}
+
+// JobOptions carries the retry policy a producer can attach to a job.
+type JobOptions struct {
+	MaxAttempts int
+	Backoff     time.Duration
 }
 
 type Program struct {
@@ -62,10 +71,12 @@ type Program struct {
 	querystringObj *sobek.Object
 	utilObj        *sobek.Object
 	eventsVal      sobek.Value
+	jobsObj        *sobek.Object
 
 	modules map[string]*moduleRecord
 	routers map[*sobek.Object]*router.Table
 	statics map[*sobek.Object]*router.Static
+	workers map[string]sobek.Value
 
 	reqSymbol *sobek.Symbol
 
@@ -93,6 +104,7 @@ func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger)
 		modules:  make(map[string]*moduleRecord),
 		routers:  make(map[*sobek.Object]*router.Table),
 		statics:  make(map[*sobek.Object]*router.Static),
+		workers:  make(map[string]sobek.Value),
 		esmPaths: make(map[sobek.ModuleRecord]string),
 		esmCache: make(map[string]sobek.ModuleRecord),
 	}

@@ -9,6 +9,7 @@ const qs = require('querystring')
 const util = require('util')
 const EventEmitter = require('events')
 const express = require('express')
+const jobs = require('jobs')
 
 const BASE = 'http://127.0.0.1'
 
@@ -450,6 +451,71 @@ app.set('view engine', 'html')
 app.get('/render', (req, res) => {
   res.locals.name = 'locals'
   res.render('hello', { name: 'e2e' })
+})
+
+jobs.process('record', (job) => {
+  fs.writeFileSync('tmp/job-' + job.id, JSON.stringify(job.payload))
+})
+
+jobs.process('async-record', async (job) => {
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  fs.writeFileSync('tmp/job-' + job.id, 'async ' + JSON.stringify(job.payload))
+})
+
+let flakyAttempts = 0
+jobs.process('flaky', (job) => {
+  flakyAttempts++
+  if (flakyAttempts < 3) throw new Error('flaky attempt ' + flakyAttempts)
+  fs.writeFileSync('tmp/job-' + job.id, 'ok ' + flakyAttempts)
+})
+
+jobs.process('slow', async () => {
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+})
+
+jobs.process('late', async (job) => {
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  fs.writeFileSync('tmp/job-' + job.id, 'late')
+})
+
+app.post('/jobs/record', (req, res) => {
+  res.status(202).json({ id: jobs.enqueue('record', req.body) })
+})
+
+app.post('/jobs/async', (req, res) => {
+  res.status(202).json({ id: jobs.enqueue('async-record', req.body) })
+})
+
+app.post('/jobs/flaky', (req, res) => {
+  const id = jobs.enqueue('flaky', req.body, { attempts: 3, backoff: 10 })
+  res.status(202).json({ id })
+})
+
+app.post('/jobs/block', (req, res) => {
+  res.status(202).json({ id: jobs.enqueue('slow', req.body) })
+})
+
+app.post('/jobs/late', (req, res) => {
+  res.status(202).json({ id: jobs.enqueue('late', req.body) })
+})
+
+app.post('/jobs/fill', (req, res) => {
+  for (let i = 0; i < 64; i++) {
+    try {
+      jobs.enqueue('slow', { i })
+    } catch (err) {
+      return res.status(503).send(err.code)
+    }
+  }
+  res.send('no rejection')
+})
+
+app.get('/jobs/result', (req, res) => {
+  try {
+    res.type('text/plain').send(fs.readFileSync('tmp/job-' + req.query.id))
+  } catch (err) {
+    res.status(404).send('missing')
+  }
 })
 
 app.use((req, res) => {

@@ -112,7 +112,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("javascript: failed to initialize runtime: %w", err)
 	}
 
-	h.background, err = jobs.Start(src, h.bridgeConfig(), h.fs, h.logger, h.QueueSize, nil, jobs.Hooks{})
+	h.background, err = jobs.Start(src, h.bridgeConfig(), h.fs, h.logger, h.QueueSize, h.execJob, jobs.Hooks{})
 	if err != nil {
 		h.loop.Stop()
 		return fmt.Errorf("javascript: failed to initialize background runtime: %w", err)
@@ -295,7 +295,37 @@ func (h *Handler) bridgeConfig() bridge.Config {
 		MaxBody:     h.MaxBody,
 		AsyncBudget: h.AsyncBudget,
 		Quit:        h.loop.Quit(),
+		EnqueueJob:  h.enqueueJob,
 	}
+}
+
+// enqueueJob admits a serialized job to the resident background runtime. The
+// queue increments its full counter before this returns false.
+func (h *Handler) enqueueJob(name string, payload []byte, opts bridge.JobOptions) (string, bool) {
+	if h.background == nil {
+		return "", false
+	}
+	job := jobs.NewJob(name, payload)
+	if opts.MaxAttempts > 0 {
+		job.MaxAttempts = opts.MaxAttempts
+	}
+	job.Backoff = opts.Backoff
+	if !h.background.Enqueue(job) {
+		return "", false
+	}
+	return job.ID, true
+}
+
+// execJob runs one job on the resident event loop. A pending promise keeps the
+// job running until its callbacks ack or fail it.
+func (h *Handler) execJob(prog *bridge.Program, job *jobs.Job) error {
+	return prog.RunJob(job.ID, job.Name, job.Payload, func(err error) {
+		if err != nil {
+			_, _ = job.Fail(err)
+			return
+		}
+		_ = job.Ack()
+	})
 }
 
 // EvalCode runs code on the directive's event loop and returns the result. The

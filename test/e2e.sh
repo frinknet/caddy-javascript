@@ -52,6 +52,7 @@ cat >"$TMP/Caddyfile" <<'CADDY'
 :80 {
 	javascript /app/server.js {
 		root        /app
+		queue_size  8
 		env_allow   E2E_SECRET
 		fetch_allow 127.0.0.1
 	}
@@ -248,6 +249,29 @@ check() {
 	fi
 }
 
+# await_job NAME ID WANT polls the fixture's result endpoint until the worker
+# output matches WANT or a five-second deadline expires.
+await_job() {
+	await_name=$1
+	await_id=$2
+	await_want=$3
+	await_got=
+	i=0
+	while [ "$i" -lt 100 ]; do
+		await_got=$(curl -sS --max-time 2 "$BASE/jobs/result?id=$await_id" 2>/dev/null)
+		if [ "$await_got" = "$await_want" ]; then
+			echo "  PASS: $await_name"
+			PASS=$((PASS + 1))
+			return
+		fi
+		i=$((i + 1))
+		sleep 0.05
+	done
+	echo "  FAIL: $await_name"
+	echo "    result $(printf '%s' "$await_got"), want $await_want"
+	FAIL=$((FAIL + 1))
+}
+
 # ── Test 1: basic request and response ─────────────────
 echo ""
 echo "=== Test 1: basic ==="
@@ -408,9 +432,65 @@ else
 	FAIL=$((FAIL + 1))
 fi
 
-# ── Test 9: provision-time validation ──────────────────
+# ── Test 9: background jobs ────────────────────────────
 echo ""
-echo "=== Test 9: provision-time validation ==="
+echo "=== Test 9: background jobs ==="
+check "jobs.enqueue returns 202 with a job id" POST /jobs/record --data '{"a":1}' --header 'Content-Type: application/json' --status 202 --ctype application/json --contains '"id":"'
+job_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$REQ/body")
+if [ -n "$job_id" ]; then
+	await_job "a job reaches its worker" "$job_id" '{"a":1}'
+else
+	echo "  FAIL: a job reaches its worker (no id returned)"
+	FAIL=$((FAIL + 1))
+fi
+
+check "an async job is admitted" POST /jobs/async --data '{"n":1}' --header 'Content-Type: application/json' --status 202 --contains '"id":"'
+async_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$REQ/body")
+if [ -n "$async_id" ]; then
+	await_job "an async worker completes its promise" "$async_id" 'async {"n":1}'
+else
+	echo "  FAIL: an async worker completes its promise (no id returned)"
+	FAIL=$((FAIL + 1))
+fi
+
+check "a retrying job is admitted" POST /jobs/flaky --status 202 --contains '"id":"'
+flaky_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$REQ/body")
+if [ -n "$flaky_id" ]; then
+	await_job "a failing job retries until it succeeds" "$flaky_id" 'ok 3'
+else
+	echo "  FAIL: a failing job retries until it succeeds (no id returned)"
+	FAIL=$((FAIL + 1))
+fi
+
+check "a blocking job is admitted" POST /jobs/block --status 202 --contains '"id":"'
+check "a queued job is admitted before the reload" POST /jobs/late --status 202 --contains '"id":"'
+late_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$REQ/body")
+if [ -n "$late_id" ]; then
+	if sed -i "s/res.send('v2')/res.send('v3')/" "$TMP/app/server.js"; then
+		i=0
+		while [ "$i" -lt 75 ]; do
+			if [ "$(curl -sS --max-time 2 "$BASE/version" 2>/dev/null)" = v3 ]; then
+				break
+			fi
+			i=$((i + 1))
+			sleep 0.2
+		done
+		sleep 2.5
+		check "a job from an older generation never runs" GET "/jobs/result?id=$late_id" --status 404 --equals missing
+	else
+		echo "  FAIL: a job from an older generation never runs (could not rewrite the script)"
+		FAIL=$((FAIL + 1))
+	fi
+else
+	echo "  FAIL: a job from an older generation never runs (no id returned)"
+	FAIL=$((FAIL + 1))
+fi
+
+check "a full job queue reports QUEUE_FULL" POST /jobs/fill --status 503 --equals 'QUEUE_FULL'
+
+# ── Test 10: provision-time validation ─────────────────
+echo ""
+echo "=== Test 10: provision-time validation ==="
 
 neg() {
 	neg_desc=$1

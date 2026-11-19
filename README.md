@@ -668,6 +668,7 @@ shims always win:
 - `express`
 - `buffer` and `node:buffer`
 - `events` and `node:events`
+- `jobs` and `node:jobs`
 - `url` and `node:url`
 - `querystring` and `node:querystring`
 - `util` and `node:util`
@@ -814,11 +815,11 @@ script is written, created, or renamed, debounced by 200ms.
 
 Provisioning also loads the script into a resident background runtime: a second
 VM with its own event loop, kept separate from request handling and from the
-request program's state. It loads at provisioning, registers its handlers, and
-then idles until shutdown; no JavaScript API reaches it yet. With `watch` on, it
-reloads with the request runtime. Top-level script code therefore runs once per
-runtime at startup and again on each reload, so top-level side effects such as
-file writes happen twice each time.
+request program's state. It loads at provisioning, registers its workers, and
+then runs queued jobs until shutdown. With `watch` on, it reloads with the
+request runtime. Top-level script code therefore runs once per runtime at
+startup and again on each reload, so top-level side effects such as file writes
+happen twice each time.
 
 The background runtime owns a bounded FIFO for jobs, sized by `queue_size`. A
 single supervisor goroutine hands one job at a time to its event loop, so jobs
@@ -852,7 +853,38 @@ generation, an optional absolute deadline, an async budget, and a retry policy
   deadline reached before a retry fails the job instead of retrying it, and the
   job context expires with the deadline.
 
-No JavaScript API can enqueue or process a job yet.
+#### Job API
+
+`require('jobs')` (also available as the global `jobs`) exposes two functions:
+
+```js
+const jobs = require('jobs')
+
+jobs.process('thumbnail', async (job) => {
+  await makeThumbnail(job.payload.path)
+})
+
+const id = jobs.enqueue('thumbnail', { path: '/uploads/a.jpg' }, {
+  attempts: 3,   // total attempts, default 1
+  backoff: 250   // milliseconds before the first retry, default 250
+})
+```
+
+- `jobs.process(name, fn)` registers a worker in the current runtime. The
+  callback receives an object with `id`, `name`, and `payload`; `payload` is the
+  parsed JSON value. A synchronous throw or a rejected promise fails the
+  attempt. A promise keeps the job running until it settles, and the supervisor
+  still runs one job at a time. Registering the same name twice in one runtime
+  throws.
+- `jobs.enqueue(name, payload, options)` serializes `payload` with
+  `JSON.stringify`, so functions, symbols, and circular values are rejected
+  with a `TypeError`. It returns the job id. A full queue throws an `Error` with
+  `code === 'QUEUE_FULL'` and increments `caddy_javascript_queue_full_total`; a
+  runtime that is not ready throws `code === 'JOBS_UNAVAILABLE'`.
+- Workers and jobs never share live VM objects: only the serialized payload
+  crosses from the caller to the resident runtime. Calling `jobs.enqueue` from
+  top-level code runs in both runtimes; enqueue from a request handler or a
+  worker, not while the script loads.
 
 ## Status codes and errors
 
@@ -1071,6 +1103,7 @@ pkg/config           options, defaults, validation, Caddyfile parsing
 pkg/metric           Prometheus counters
 pkg/sched            task queue, single-thread run loop, backpressure, drain
 pkg/bridge           Sobek runtime, JS globals, req/res, timers, fetch, watchdog
+pkg/jobs             resident background runtime, bounded job queue, worker supervisor
 pkg/router           route table and dispatch
 pkg/files            sandboxed fs, path.join, fsnotify hot reload
 www/test             sample Caddyfile, run.sh, and app for manual testing

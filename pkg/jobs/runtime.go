@@ -188,7 +188,9 @@ func (r *Runtime) run(job *Job) {
 	}
 
 	if err := r.dispatch(job); err != nil {
-		if _, ferr := job.Fail(err); ferr != nil {
+		if errors.Is(err, bridge.ErrAsyncPending) {
+			job.awaitAsync()
+		} else if _, ferr := job.Fail(err); ferr != nil {
 			r.logSkipped(job, ferr)
 		}
 	} else if err := job.Ack(); err != nil {

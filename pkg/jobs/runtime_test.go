@@ -408,6 +408,92 @@ func TestRuntimeDrainsQueuedJobsOnStop(t *testing.T) {
 	}
 }
 
+func TestRuntimeWaitsForAsyncJob(t *testing.T) {
+	started := make(chan *Job, 2)
+	exec := func(_ *bridge.Program, job *Job) error {
+		started <- job
+		return bridge.ErrAsyncPending
+	}
+
+	rt, err := Start([]byte(``), bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	job := NewJob("async", nil)
+	if !rt.Enqueue(job) {
+		t.Fatal("job was rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("job never started")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	if got := job.State(); got != StateRunning {
+		t.Fatalf("state = %s while the promise is pending, want running", got)
+	}
+	if err := job.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, job, StateSucceeded)
+
+	next := NewJob("next", nil)
+	if !rt.Enqueue(next) {
+		t.Fatal("second job was rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("second job never started after the async job completed")
+	}
+	if err := next.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, next, StateSucceeded)
+}
+
+func TestRuntimeCancelsPendingAsyncJob(t *testing.T) {
+	started := make(chan *Job, 1)
+	exec := func(_ *bridge.Program, job *Job) error {
+		started <- job
+		return bridge.ErrAsyncPending
+	}
+
+	rt, err := Start([]byte(``), bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	job := NewJob("async", nil)
+	if !rt.Enqueue(job) {
+		t.Fatal("job was rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("job never started")
+	}
+
+	job.Cancel()
+	waitState(t, job, StateCancelled)
+
+	next := NewJob("next", nil)
+	if !rt.Enqueue(next) {
+		t.Fatal("job rejected after the async job was cancelled")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not advance after an async job was cancelled")
+	}
+	_, _ = next.Fail(errors.New("done"))
+	waitState(t, next, StateFailed)
+}
+
 func TestRuntimeReloadSwapsProgram(t *testing.T) {
 	loaded := make(chan *bridge.Program, 4)
 	ranOn := make(chan *bridge.Program, 4)

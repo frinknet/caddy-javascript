@@ -44,6 +44,8 @@ func (p *Program) builtin(name string) (sobek.Value, bool) {
 		return p.utilObj, true
 	case "events", "node:events":
 		return p.eventsVal, true
+	case "jobs", "node:jobs":
+		return p.jobsObj, true
 	default:
 		return nil, false
 	}

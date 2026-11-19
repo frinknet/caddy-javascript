@@ -113,6 +113,7 @@ type Job struct {
 	err      error
 	ctx      context.Context
 	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 // NewJob returns a pending job with a fresh id and the default retry policy.
@@ -208,7 +209,37 @@ func (j *Job) Start() error {
 
 	j.state = StateRunning
 	j.attempts++
+	j.done = make(chan struct{})
 	return nil
+}
+
+// awaitAsync blocks until an asynchronous attempt settles or the job's context
+// ends. It runs on the supervisor goroutine, never on the event loop.
+func (j *Job) awaitAsync() {
+	j.mu.Lock()
+	done := j.done
+	j.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-j.Context().Done():
+		_, _ = j.Fail(j.Context().Err())
+	}
+}
+
+// signalDoneLocked wakes a waiter after the attempt produced a result. It only
+// closes the channel created by Start, so a job that never ran is unaffected.
+func (j *Job) signalDoneLocked() {
+	if j.done == nil {
+		return
+	}
+	select {
+	case <-j.done:
+	default:
+		close(j.done)
+	}
 }
 
 // Ack marks a running job as succeeded.
@@ -220,6 +251,7 @@ func (j *Job) Ack() error {
 	}
 	j.state = StateSucceeded
 	j.err = nil
+	j.signalDoneLocked()
 	return nil
 }
 
@@ -244,6 +276,7 @@ func (j *Job) Fail(cause error) (State, error) {
 	if !j.Deadline.IsZero() && !time.Now().Before(j.Deadline) {
 		j.state = StateFailed
 		j.err = ErrJobDeadline
+		j.signalDoneLocked()
 		return j.state, nil
 	}
 
@@ -251,15 +284,18 @@ func (j *Job) Fail(cause error) (State, error) {
 	if errors.Is(j.ctx.Err(), context.Canceled) {
 		j.state = StateCancelled
 		j.err = ErrJobCancelled
+		j.signalDoneLocked()
 		return j.state, nil
 	}
 
 	if j.attempts >= j.maxAttemptsLocked() {
 		j.state = StateFailed
+		j.signalDoneLocked()
 		return j.state, nil
 	}
 
 	j.state = StateRetrying
+	j.signalDoneLocked()
 	return j.state, nil
 }
 
@@ -276,6 +312,7 @@ func (j *Job) Abandon(cause error) {
 	}
 	j.state = StateFailed
 	j.err = cause
+	j.signalDoneLocked()
 }
 
 // Fence stops a non-terminal job that belongs to a superseded runtime
@@ -292,6 +329,7 @@ func (j *Job) Fence() bool {
 	j.cancel()
 	j.state = StateCancelled
 	j.err = ErrJobStale
+	j.signalDoneLocked()
 	return true
 }
 
@@ -307,6 +345,7 @@ func (j *Job) Cancel() bool {
 	j.cancel()
 	j.state = StateCancelled
 	j.err = ErrJobCancelled
+	j.signalDoneLocked()
 	return true
 }
 

@@ -17,6 +17,7 @@ func (p *Program) registerEnvironment() {
 	p.registerPath()
 	p.registerTimers()
 	p.registerFetch()
+	p.registerJobs()
 	p.registerShims()
 }
 
