@@ -20,6 +20,7 @@ import (
 	"github.com/frinknet/caddy-javascript/pkg/config"
 	"github.com/frinknet/caddy-javascript/pkg/eval"
 	"github.com/frinknet/caddy-javascript/pkg/files"
+	"github.com/frinknet/caddy-javascript/pkg/jobs"
 	"github.com/frinknet/caddy-javascript/pkg/metric"
 	"github.com/frinknet/caddy-javascript/pkg/sched"
 )
@@ -37,6 +38,7 @@ type Handler struct {
 	fs         *files.FS
 	loop       *sched.Loop
 	prog       *bridge.Program
+	background *jobs.Runtime
 	watcher    *files.Watcher
 	scriptPath string
 }
@@ -69,6 +71,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return err
 	}
 
+	h.scriptPath = scriptPath
+
+	src, err := os.ReadFile(h.scriptPath)
+	if err != nil {
+		return fmt.Errorf("javascript: failed to initialize runtime: %w", err)
+	}
+
 	h.fs, err = files.NewFS(rootDir)
 	if err != nil {
 		return fmt.Errorf("javascript: opening root %q: %w", rootDir, err)
@@ -79,8 +88,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.logger.Error("javascript: recovered from panic", zap.Any("panic", r))
 	}
 
-	h.scriptPath = scriptPath
-
 	if h.Eval {
 		eval.Register(h.scriptPath, h)
 	}
@@ -90,11 +97,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 	scheduled := h.loop.Submit(func() {
 		prog := bridge.NewProgram(h.bridgeConfig(), h.fs, h.loop, h.logger)
-		src, err := os.ReadFile(h.scriptPath)
-		if err != nil {
-			initErr <- err
-			return
-		}
 		if err := prog.Load(src); err != nil {
 			initErr <- err
 			return
@@ -108,6 +110,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 	if err := <-initErr; err != nil {
 		return fmt.Errorf("javascript: failed to initialize runtime: %w", err)
+	}
+
+	h.background, err = jobs.Start(src, h.bridgeConfig(), h.fs, h.logger, h.QueueSize, jobs.Hooks{})
+	if err != nil {
+		h.loop.Stop()
+		return fmt.Errorf("javascript: failed to initialize background runtime: %w", err)
 	}
 
 	if h.Options.Watching() {
@@ -146,6 +154,9 @@ func (h *Handler) Cleanup() error {
 	}
 	if h.watcher != nil {
 		_ = h.watcher.Close()
+	}
+	if h.background != nil {
+		h.background.Stop()
 	}
 	if h.loop != nil {
 		h.loop.Stop()

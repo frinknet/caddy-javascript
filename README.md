@@ -808,6 +808,15 @@ script is written, created, or renamed, debounced by 200ms.
 - Watching needs functional inotify. Some network filesystems do not deliver
   events; use `watch false` there.
 
+### Background runtime
+
+Provisioning also loads the script into a resident background runtime: a second
+VM with its own event loop, kept separate from request handling and from the
+request program's state. It loads once, registers its handlers, and then idles
+until shutdown; no JavaScript API reaches it yet, and it is not reloaded with
+the request runtime. Top-level script code therefore runs once per runtime at
+startup, so top-level side effects such as file writes happen twice.
+
 ## Status codes and errors
 
 | Situation | Response |
