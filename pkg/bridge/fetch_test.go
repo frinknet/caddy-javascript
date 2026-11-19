@@ -35,6 +35,13 @@ func newFetchServer(t *testing.T) *httptest.Server {
 			http.Redirect(w, r, "/json", http.StatusFound)
 		case "/big":
 			_, _ = w.Write(bytes.Repeat([]byte("x"), maxFetchBytes+1))
+		case "/slow":
+			time.Sleep(200 * time.Millisecond)
+			_, _ = io.WriteString(w, "slow")
+		case "/headers":
+			w.Header().Set("X-Cache-Control", r.Header.Get("Cache-Control"))
+			w.Header().Set("X-Cookie", r.Header.Get("Cookie"))
+			_, _ = io.WriteString(w, "headers")
 		default:
 			http.NotFound(w, r)
 		}
@@ -358,5 +365,238 @@ func TestFetchStreamingCap(t *testing.T) {
 	}
 	if rec.Code != 502 || !strings.Contains(rec.Body.String(), "exceeds") {
 		t.Fatalf("status = %d body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFetchAbortSignalPromise(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			const c = new AbortController()
+			setTimeout(function() { c.abort() }, 20)
+			fetch(%q, { signal: c.signal })
+				.then(function() { res.send('ok') })
+				.catch(function(e) { res.status(502).send(e.name) })
+		})
+	`, srv.URL+"/slow")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 502 {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if got := rec.Body.String(); got != "AbortError" {
+		t.Fatalf("body = %q, want AbortError", got)
+	}
+}
+
+func TestFetchAbortSignalCallback(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			const c = new AbortController()
+			setTimeout(function() { c.abort() }, 20)
+			fetch(%q, { signal: c.signal }, function(err) {
+				if (err) { res.status(502).send(String(err)); return }
+				res.send('ok')
+			})
+		})
+	`, srv.URL+"/slow")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 502 {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "aborted") {
+		t.Fatalf("body = %q, want aborted", body)
+	}
+}
+
+func TestFetchBlobBody(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			const blob = new Blob(['hi'], { type: 'text/plain' })
+			fetch(%q, { method: 'POST', body: blob }).then(function(r) {
+				return r.text()
+			}).then(function(t) { res.send(t) }).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/echo")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "|hi") {
+		t.Fatalf("body = %q, want |hi", got)
+	}
+}
+
+func TestFetchFormDataBody(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			const form = new FormData()
+			form.append('name', 'value')
+			fetch(%q, { method: 'POST', body: form }).then(function(r) {
+				return r.text()
+			}).then(function(t) { res.send(t) }).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/echo")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "name") || !strings.Contains(got, "value") {
+		t.Fatalf("body = %q, want name/value", got)
+	}
+}
+
+func TestFetchURLSearchParamsBody(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			const params = new URLSearchParams({ a: '1', b: '2' })
+			fetch(%q, { method: 'POST', body: params }).then(function(r) {
+				return r.text()
+			}).then(function(t) { res.send(t) }).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/echo")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "a=1") || !strings.Contains(got, "b=2") {
+		t.Fatalf("body = %q, want a=1&b=2", got)
+	}
+}
+
+func TestFetchArrayBuffer(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q).then(function(r) {
+				return r.arrayBuffer()
+			}).then(function(buf) {
+				res.send(String(buf.byteLength))
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/json")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "7" {
+		t.Fatalf("body = %q, want 7", got)
+	}
+}
+
+func TestFetchClone(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q).then(function(r) {
+				const c = r.clone()
+				return Promise.all([r.text(), c.text()])
+			}).then(function(parts) {
+				res.send(parts[0] + '|' + parts[1])
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/json")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != `{"a":1}|{"a":1}` {
+		t.Fatalf("body = %q", got)
+	}
+}
+
+func TestFetchRedirectError(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q, { redirect: 'error' }).then(function() {
+				res.send('ok')
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/redirect")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 502 {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "redirect blocked") {
+		t.Fatalf("body = %q, want redirect blocked", body)
+	}
+}
+
+func TestFetchRedirectManual(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q, { redirect: 'manual' }).then(function(r) {
+				res.json({ status: r.status, location: r.headers.get('Location') })
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/redirect")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"status":302`) || !strings.Contains(body, "/json") {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestFetchCacheHeader(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q, { cache: 'no-store' }).then(function(r) {
+				res.send(r.headers.get('X-Cache-Control'))
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/headers")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "no-store" {
+		t.Fatalf("body = %q, want no-store", got)
+	}
+}
+
+func TestFetchCredentialsOmit(t *testing.T) {
+	srv := newFetchServer(t)
+	script := fmt.Sprintf(`
+		app.get('/x', function(req, res) {
+			fetch(%q, { credentials: 'omit', headers: { Cookie: 'secret=1' } }).then(function(r) {
+				res.send(r.headers.get('X-Cookie'))
+			}).catch(function(e) { res.status(502).send(e.message) })
+		})
+	`, srv.URL+"/headers")
+
+	rec, err := serveFetch(t, script, []string{fetchHost(t, srv)}, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "" {
+		t.Fatalf("body = %q, want empty", got)
 	}
 }

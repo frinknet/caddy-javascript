@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -404,12 +405,12 @@ func TestEncodeBody(t *testing.T) {
 	}
 }
 
-func serveScript(t *testing.T, script, method, path string, sched *fakeScheduler) (*httptest.ResponseRecorder, error) {
+func serveScript(t *testing.T, script, method, path string, sched *fakeScheduler, headers ...http.Header) (*httptest.ResponseRecorder, error) {
 	t.Helper()
-	return serveScriptIn(t, t.TempDir(), script, method, path, sched)
+	return serveScriptIn(t, t.TempDir(), script, method, path, sched, headers...)
 }
 
-func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeScheduler) (*httptest.ResponseRecorder, error) {
+func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeScheduler, headers ...http.Header) (*httptest.ResponseRecorder, error) {
 	t.Helper()
 	fsys, err := files.NewFS(dir)
 	if err != nil {
@@ -429,7 +430,11 @@ func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeSc
 	if len(layers) == 0 {
 		t.Fatalf("no layers matched %s %s", method, path)
 	}
-	reqObj := p.BuildRequest(&RequestContext{Method: method, Path: path}, params)
+	var hdrs http.Header
+	if len(headers) > 0 {
+		hdrs = headers[0]
+	}
+	reqObj := p.BuildRequest(&RequestContext{Method: method, Path: path, Headers: hdrs}, params)
 	resObj := p.BuildResponse(w)
 
 	serveErr := p.Serve(ex, time.Second, func() error {

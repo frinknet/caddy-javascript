@@ -137,12 +137,13 @@ func isNilValue(v sobek.Value) bool {
 // chain when the layer does not handle the request.
 func (c *Chain) serveStatic(layer *router.Layer) {
 	next := func() { c.advance(sobek.Undefined()) }
-	rest, ok := layer.Relative(c.reqString("path"))
+	fullPath := c.reqString("path")
+	rest, ok := layer.Relative(fullPath)
 	if !ok {
 		next()
 		return
 	}
-	c.p.serveStaticFile(layer.Static, rest, strings.ToUpper(c.reqString("method")), next)
+	c.p.serveStaticFile(layer.Static, rest, fullPath, strings.ToUpper(c.reqString("method")), c.p.staticHeaders(c.req), next)
 }
 
 func (c *Chain) reqString(name string) string {

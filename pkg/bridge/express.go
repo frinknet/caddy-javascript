@@ -1,7 +1,9 @@
 package bridge
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/grafana/sobek"
 
@@ -40,6 +42,40 @@ func (p *Program) installRoutes(obj *sobek.Object, table *router.Table, label st
 	}
 	_ = obj.Set("all", p.routeSetter(table, "", label))
 	_ = obj.Set("use", p.useSetter(table, label))
+	_ = obj.Set("route", p.routeChainSetter(table, label))
+	_ = obj.Set("param", func(call sobek.FunctionCall) sobek.Value {
+		name := call.Argument(0).String()
+		fn, ok := sobek.AssertFunction(call.Argument(1))
+		if !ok {
+			panic(p.rt.NewTypeError("%s.param requires a function", label))
+		}
+		table.Param(name, fn, functionArity(p.rt, call.Argument(1)))
+		return sobek.Undefined()
+	})
+}
+
+func (p *Program) routeChainSetter(table *router.Table, label string) func(sobek.FunctionCall) sobek.Value {
+	return func(call sobek.FunctionCall) sobek.Value {
+		path := call.Argument(0).String()
+		route := p.rt.NewObject()
+		for _, method := range routeMethods {
+			method := method
+			name := label + ".route(...)." + strings.ToLower(method)
+			_ = route.Set(strings.ToLower(method), func(call sobek.FunctionCall) sobek.Value {
+				for _, h := range p.handlers(call, 0, name) {
+					table.Add(method, path, h.fn, h.arity)
+				}
+				return route
+			})
+		}
+		_ = route.Set("all", func(call sobek.FunctionCall) sobek.Value {
+			for _, h := range p.handlers(call, 0, label+".route(...).all") {
+				table.Add("", path, h.fn, h.arity)
+			}
+			return route
+		})
+		return route
+	}
 }
 
 func (p *Program) routeSetter(table *router.Table, method, label string) func(sobek.FunctionCall) sobek.Value {
@@ -113,6 +149,7 @@ func (p *Program) newStatic(call sobek.FunctionCall) sobek.Value {
 		Index:       "index.html",
 		Fallthrough: true,
 		Dotfiles:    "ignore",
+		ETag:        true,
 	}
 	if opts := call.Argument(1); !isNilValue(opts) {
 		p.applyStaticOptions(cfg, opts)
@@ -146,6 +183,57 @@ func (p *Program) applyStaticOptions(cfg *router.Static, opts sobek.Value) {
 	if v := obj.Get("dotfiles"); !isNilValue(v) {
 		cfg.Dotfiles = strings.ToLower(v.String())
 	}
+	if v := obj.Get("maxAge"); !isNilValue(v) {
+		cfg.MaxAgeSet = true
+		cfg.MaxAge = time.Duration(v.ToInteger()) * time.Millisecond
+	}
+	if v := obj.Get("etag"); !isNilValue(v) {
+		if enabled, ok := v.Export().(bool); ok {
+			cfg.ETag = enabled
+		}
+	}
+	if v := obj.Get("extensions"); !isNilValue(v) {
+		cfg.Extensions = nil
+		if items, ok := v.Export().([]interface{}); ok {
+			for _, item := range items {
+				cfg.Extensions = append(cfg.Extensions, strings.TrimPrefix(fmt.Sprint(item), "."))
+			}
+		} else if s, ok := v.Export().(string); ok {
+			for _, part := range strings.Split(s, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					cfg.Extensions = append(cfg.Extensions, strings.TrimPrefix(part, "."))
+				}
+			}
+		}
+	}
+}
+
+func (p *Program) expandParams(layers []*router.Layer) []*router.Layer {
+	seen := make(map[*router.Param]bool)
+	out := make([]*router.Layer, 0, len(layers))
+	for _, layer := range layers {
+		for _, binding := range layer.Params {
+			if seen[binding.Param] {
+				continue
+			}
+			seen[binding.Param] = true
+			out = append(out, p.paramLayer(binding))
+		}
+		out = append(out, layer)
+	}
+	return out
+}
+
+func (p *Program) paramLayer(binding router.ParamBinding) *router.Layer {
+	param := binding.Param
+	value := binding.Value
+	fnValue := p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
+		_, _ = param.Fn(sobek.Undefined(), call.Argument(0), call.Argument(1), call.Argument(2), p.rt.ToValue(value), p.rt.ToValue(param.Name))
+		return sobek.Undefined()
+	})
+	fn, _ := sobek.AssertFunction(fnValue)
+	return &router.Layer{Use: true, Fn: fn, Arity: 3}
 }
 
 func (p *Program) routerTable(v sobek.Value) (*router.Table, bool) {

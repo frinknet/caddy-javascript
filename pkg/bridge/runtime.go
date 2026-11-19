@@ -74,7 +74,8 @@ func (p *Program) Load(src []byte) error {
 // Match returns the layers registered for the request, in registration order,
 // with the parameters captured from the path.
 func (p *Program) Match(method, path string) ([]*router.Layer, map[string]string) {
-	return p.routes.Match(method, path)
+	layers, params := p.routes.Match(method, path)
+	return p.expandParams(layers), params
 }
 
 func (p *Program) Runtime() *sobek.Runtime {

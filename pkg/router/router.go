@@ -2,6 +2,7 @@ package router
 
 import (
 	"strings"
+	"time"
 
 	"github.com/grafana/sobek"
 )
@@ -17,6 +18,27 @@ type Static struct {
 	Fallthrough bool
 	// Dotfiles is "allow", "ignore", or "deny".
 	Dotfiles string
+	// MaxAge sets Cache-Control max-age. MaxAgeSet distinguishes zero from
+	// unset.
+	MaxAge    time.Duration
+	MaxAgeSet bool
+	// ETag enables ETag generation and If-None-Match handling.
+	ETag bool
+	// Extensions are tried in order when the file is not found.
+	Extensions []string
+}
+
+// Param is a router.param callback bound to a captured path parameter.
+type Param struct {
+	Name  string
+	Fn    sobek.Callable
+	Arity int
+}
+
+// ParamBinding pairs a Param with the value captured for one request.
+type ParamBinding struct {
+	Param *Param
+	Value string
 }
 
 // Layer is one registered route or middleware. An empty Method matches every
@@ -41,6 +63,10 @@ type Layer struct {
 	Router *Table
 	Static *Static
 
+	// Params are the router.param callbacks to run before Fn, bound to the
+	// values captured for this request.
+	Params []ParamBinding
+
 	segments []segment
 }
 
@@ -55,10 +81,19 @@ type segment struct {
 // they are tried in.
 type Table struct {
 	layers []*Layer
+	params map[string][]*Param
 }
 
 func New() *Table {
-	return &Table{}
+	return &Table{params: make(map[string][]*Param)}
+}
+
+// Param registers a callback run before any route that captures name.
+func (t *Table) Param(name string, fn sobek.Callable, arity int) {
+	if t.params == nil {
+		t.params = make(map[string][]*Param)
+	}
+	t.params[name] = append(t.params[name], &Param{Name: name, Fn: fn, Arity: arity})
 }
 
 // Add registers a route for one method and path. Method may be empty to match
@@ -130,9 +165,15 @@ func (t *Table) match(method string, parts []string, base string) ([]*Layer, map
 			continue
 		}
 		out := layer
-		if layer.Static != nil && base != "" {
+		if layer.Static != nil {
+			if base != "" {
+				copied := *layer
+				copied.Base = base
+				out = &copied
+			}
+		} else if bindings := t.bindParams(layer, captured); len(bindings) > 0 {
 			copied := *layer
-			copied.Base = base
+			copied.Params = bindings
 			out = &copied
 		}
 		matched = append(matched, out)
@@ -286,6 +327,43 @@ func setParam(params map[string]string, name, value string) map[string]string {
 	}
 	params[name] = value
 	return params
+}
+
+func (t *Table) bindParams(layer *Layer, captured map[string]string) []ParamBinding {
+	if len(t.params) == 0 || len(captured) == 0 {
+		return nil
+	}
+	var (
+		out  []ParamBinding
+		seen map[*Param]bool
+	)
+	for _, seg := range layer.segments {
+		name := ""
+		switch {
+		case seg.wildcard:
+			name = wildcardName(seg)
+		case seg.param != "":
+			name = seg.param
+		}
+		if name == "" {
+			continue
+		}
+		value, ok := captured[name]
+		if !ok {
+			continue
+		}
+		for _, param := range t.params[name] {
+			if seen[param] {
+				continue
+			}
+			if seen == nil {
+				seen = make(map[*Param]bool)
+			}
+			seen[param] = true
+			out = append(out, ParamBinding{Param: param, Value: value})
+		}
+	}
+	return out
 }
 
 func mergeParams(dst *map[string]string, src map[string]string) {

@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -298,5 +299,162 @@ func TestExpressRouterMountsAtRoot(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "rooted" {
 		t.Fatalf("body = %q, want rooted", got)
+	}
+}
+
+func TestExpressRouteChain(t *testing.T) {
+	script := `
+		const express = require('express')
+		const router = express.Router()
+		router.route('/thing')
+			.get(function(req, res) { res.send('get') })
+			.post(function(req, res) { res.send('post') })
+		app.use('/api', router)
+	`
+	rec, err := serveScript(t, script, "GET", "/api/thing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "get" {
+		t.Fatalf("GET body = %q, want get", got)
+	}
+	rec, err = serveScript(t, script, "POST", "/api/thing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "post" {
+		t.Fatalf("POST body = %q, want post", got)
+	}
+}
+
+func TestExpressParam(t *testing.T) {
+	rec, err := serveScript(t, `
+		const express = require('express')
+		const router = express.Router()
+		router.param('id', function(req, res, next, value, name) {
+			req.params[name] = 'v' + value
+			next()
+		})
+		router.get('/item/:id', function(req, res) { res.send(req.params.id) })
+		app.use(router)
+	`, "GET", "/item/7", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "v7" {
+		t.Fatalf("body = %q, want v7", got)
+	}
+}
+
+func TestExpressParamSkipsUnmatchedRoute(t *testing.T) {
+	rec, err := serveScript(t, `
+		const express = require('express')
+		const router = express.Router()
+		router.param('id', function(req, res, next) { res.status(500).send('param') })
+		router.get('/item/:id', function(req, res) { res.send('item') })
+		app.use(router)
+		app.use(function(req, res) { res.status(404).send('miss') })
+	`, "GET", "/other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 404 || rec.Body.String() != "miss" {
+		t.Fatalf("status = %d body = %q, want 404 miss", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExpressStaticDirectoryRedirect(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/dir/index.html", "home")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", ""), "GET", "/static/dir", &fakeScheduler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 301 {
+		t.Fatalf("status = %d, want 301", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "/static/dir/" {
+		t.Fatalf("Location = %q, want /static/dir/", got)
+	}
+}
+
+func TestExpressStaticRange(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/hello.txt", "0123456789")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", ""), "GET", "/static/hello.txt", &fakeScheduler{}, http.Header{"Range": {"bytes=2-5"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 206 {
+		t.Fatalf("status = %d, want 206", rec.Code)
+	}
+	if got := rec.Body.String(); got != "2345" {
+		t.Fatalf("body = %q, want 2345", got)
+	}
+	if got := rec.Header().Get("Content-Range"); got != "bytes 2-5/10" {
+		t.Fatalf("Content-Range = %q, want bytes 2-5/10", got)
+	}
+}
+
+func TestExpressStaticConditional304(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/hello.txt", "hi")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", ""), "GET", "/static/hello.txt", &fakeScheduler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("missing ETag")
+	}
+
+	rec, err = serveScriptIn(t, dir, staticScript("'/static'", ""), "GET", "/static/hello.txt", &fakeScheduler{}, http.Header{"If-None-Match": {etag}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 304 {
+		t.Fatalf("status = %d, want 304", rec.Code)
+	}
+}
+
+func TestExpressStaticMaxAge(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/hello.txt", "hi")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", "{ maxAge: 60000 }"), "GET", "/static/hello.txt", &fakeScheduler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=60" {
+		t.Fatalf("Cache-Control = %q, want public, max-age=60", got)
+	}
+}
+
+func TestExpressStaticETagDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/hello.txt", "hi")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", "{ etag: false }"), "GET", "/static/hello.txt", &fakeScheduler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Header().Get("ETag"); got != "" {
+		t.Fatalf("ETag = %q, want empty", got)
+	}
+}
+
+func TestExpressStaticExtensions(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "public/about.html", "about")
+
+	rec, err := serveScriptIn(t, dir, staticScript("'/static'", "{ extensions: ['html'] }"), "GET", "/static/about", &fakeScheduler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || rec.Body.String() != "about" {
+		t.Fatalf("status = %d body = %q, want 200 about", rec.Code, rec.Body.String())
 	}
 }

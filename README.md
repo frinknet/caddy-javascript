@@ -316,8 +316,21 @@ still seen.
 
 `req.path` is not rewritten: handlers inside a router see the full request
 path, matching the `app.use` rule above. A router that matches nothing falls
-through to the next layer of its parent, so later middleware still runs. There
-is no `router.route()` chain and no `router.param()`.
+through to the next layer of its parent, so later middleware still runs.
+
+`router.route(path)` returns a route object whose method handlers (`get`,
+`post`, and so on) share the path and chain:
+
+```js
+router.route('/users/:id')
+	.get((req, res) => res.json({ id: req.params.id }))
+	.post((req, res) => res.status(201).end())
+```
+
+`router.param(name, fn)` registers a callback for a captured parameter. It runs
+once per request before the first matching route handler, with
+`fn(req, res, next, value, name)`, and `next()` continues. Param callbacks are
+local to the router that registered them.
 
 ### Static files: `express.static()`
 
@@ -338,12 +351,15 @@ Supported options:
 | `index` | `"index.html"` | Index file for a directory. `false` disables it. |
 | `fallthrough` | `true` | Continue the chain when the file is missing. `false` sends `404`. |
 | `dotfiles` | `"ignore"` | `"allow"` serves dotted paths, `"deny"` sends `403`, `"ignore"` falls through. |
+| `maxAge` | unset | Sets `Cache-Control: public, max-age=N` from milliseconds. |
+| `etag` | `true` | Generates an `ETag` and honors `If-None-Match`. |
+| `extensions` | none | Extensions tried in order when the file is missing, e.g. `['html']`. |
 
-Only `GET` and `HEAD` are served; other methods fall through. Files are read
-whole and served with `Content-Type`, `Content-Length`, and `Last-Modified`.
-There is no range support, no conditional `304` handling, and no directory
-redirect, so `/dir` and `/dir/` both serve the index. Dotfiles are ignored by
-default.
+Only `GET` and `HEAD` are served; other methods fall through. Files are
+streamed with `Content-Type`, `Content-Length`, `Last-Modified`, and an `ETag`.
+`Range` requests get `206` with `Content-Range`, and `If-None-Match` or
+`If-Modified-Since` can produce `304`. A directory requested without a trailing
+slash redirects to the slash with `301`. Dotfiles are ignored by default.
 
 ### Request: `req`
 
@@ -435,12 +451,17 @@ Options:
 |---|---|
 | `method` | HTTP method, default `GET`. A body with `GET` or `HEAD` rejects. |
 | `headers` | Plain object. Array values add repeated headers; `Host` sets the request host. |
-| `body` | Request body as a string. |
+| `body` | String, `Blob`, `FormData`, `URLSearchParams`, or `ArrayBuffer`/typed array. |
+| `redirect` | `follow` (default), `error`, or `manual`. |
+| `cache` | `default`, `no-store`, `reload`, `no-cache`, `force-cache`, or `only-if-cached`. |
+| `credentials` | `same-origin` (default), `omit`, or `include`. |
+| `signal` | An `AbortSignal` from `new AbortController()`. |
 
 The Promise resolves to a response with `status`, `statusText`, `ok`, `url`,
 `redirected`, and `headers`. `headers` is an object of lowercased names plus
 `get(name)`, `has(name)`, and `forEach(fn)`. The body is consumed with
-`text()`, `json()`, or `body.getReader()`:
+`text()`, `json()`, `arrayBuffer()`, or `body.getReader()`. `clone()` returns
+an independent response backed by a buffered copy of the body:
 
 ```js
 app.get('/stream', (req, res) => {
@@ -477,8 +498,12 @@ Behavior and limits:
 - The timeout is 10s for the whole exchange, including streaming, and the
   response body is capped at 1 MiB.
 - The Promise rejects with an `Error`; the callback's `err` remains a string.
-- Request bodies are strings, and there is no `FormData`, `Blob`,
-  `URLSearchParams`, `AbortSignal`, `arrayBuffer()`, or `clone()`.
+- `AbortController` and `AbortSignal` cancel an in-flight request. The signal
+  rejects the Promise or calls the callback with an abort error.
+- `redirect` `error` rejects on a redirect; `manual` resolves with the 3xx
+  response. `cache` maps to `Cache-Control` headers and `credentials` `omit`
+  drops the `Cookie` header. There is no HTTP cache or cookie jar.
+- `clone()` buffers the body, so a cloned response cannot be streamed.
 - A Promise response body that is never consumed is abandoned; its request is
   closed when the timeout fires.
 
