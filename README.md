@@ -154,7 +154,7 @@ takes one or more names.
 |---|---|---|
 | script path | required | Resolved relative to the Caddy process working directory, then made absolute. |
 | `root` | script's directory | Sandbox root for `fs` and `path`. Also made absolute. |
-| `timeout` | `3s` | Go duration. Overrides the handler invocation budget, not async callbacks. `0` means the default. |
+| `timeout` | `3s` | Go duration. Budget for each handler invocation and each async callback. `0` means the default. |
 | `queue_size` | `5000` | Number of queued tasks (requests plus async callbacks). |
 | `max_body` | `1048576` | Bytes. Larger bodies get `413`. `0` means the default. |
 | `watch` | on | `watch`, `watch true`, `watch false`. Watches the script's directory. |
@@ -368,9 +368,15 @@ slash redirects to the slash with `301`. Dotfiles are ignored by default.
 | `req.path` | Decoded URL path. |
 | `req.method` | HTTP method. |
 | `req.host` | Request `Host`, including port when present. |
+| `req.url` | Request path including the query string. |
+| `req.originalUrl` | Request path as received, including the query string. Equal to `req.url` because handlers never rewrite the path. |
+| `req.ip` | Client address from the connection, without the port. |
+| `req.protocol` | `"https"` when the connection uses TLS, otherwise `"http"`. |
+| `req.secure` | `true` when `req.protocol` is `"https"`. |
 | `req.params` | Path parameters captured by the matched route. |
 | `req.headers` | Object of header values, canonical names (`Content-Type`), first value only. |
 | `req.header(name)` | Case-insensitive header lookup, first value or `undefined`. |
+| `req.get(name)` | Alias of `req.header(name)`. |
 | `req.query` | Object of query parameters, first value per name. |
 | `req.queryAll` | Object of arrays, every value per name. |
 | `req.body` | Parsed body (see below). |
@@ -593,7 +599,8 @@ response is written or until no async work remains for that request:
 2. The layers that match the request run on the loop goroutine, in
    registration order, each advancing the chain with `next()`.
 3. If the handler schedules `fetch`, timers, or async `fs`, the exchange keeps
-   a pending count. Callbacks are re-submitted to the same loop.
+   a pending count. Callbacks are re-submitted to the same loop, and each one
+   runs under the `timeout` watchdog.
 4. The request finishes when the response is written, or when the handler has
    returned and no callbacks are pending.
 5. If the client disconnects, Caddy returns and the exchange is abandoned; the
@@ -603,11 +610,13 @@ This is what allows a response to be completed from a callback.
 
 ### Timeouts
 
-`timeout` bounds the synchronous handler invocation. When it expires the VM is
-interrupted, the interrupt flag is cleared, and the runtime stays usable for
-later requests. If nothing was written the client gets `504`; otherwise the
-partial response stands. Async callback execution is not covered by this
-watchdog yet, so a slow callback can hold a request open.
+`timeout` bounds every JavaScript invocation: the synchronous handler call and
+each async callback (`setTimeout`, `setInterval`, `fetch`, `fs`). When a budget
+expires the VM is interrupted, the interrupt flag is cleared, and the runtime
+stays usable for later requests. If nothing was written the client gets `504`;
+otherwise the partial response stands. A timed-out callback abandons its
+exchange: the request finishes immediately, the timers it owns are cancelled,
+and the event loop moves on, so one runaway callback cannot wedge the server.
 
 ### Backpressure
 
@@ -666,6 +675,8 @@ script is written, created, or renamed, debounced by 200ms.
 | `next(err)` reaches an error handler | Whatever the error handler sent. |
 | Handler exceeds `timeout`, nothing written | `504 Gateway Timeout`. |
 | Handler exceeds `timeout` after writing | Partial response stands, error logged. |
+| Async callback exceeds `timeout`, nothing written | `504 Gateway Timeout`; its timers are cancelled. |
+| Async callback exceeds `timeout` after writing | Partial response stands, error logged. |
 | Body exceeds `max_body` | `413 Request Entity Too Large`. |
 | Body read error | `400 Bad Request`. |
 | Event queue full | `503 Service Unavailable`. |
@@ -705,7 +716,7 @@ Caddy's Prometheus endpoint exposes:
 | Metric | Type | Meaning |
 |---|---|---|
 | `caddy_javascript_requests_total{status}` | counter | Responses the handler completed, labelled by status. |
-| `caddy_javascript_timeouts_total` | counter | Handler invocations interrupted by the watchdog. |
+| `caddy_javascript_timeouts_total` | counter | Handler invocations and async callbacks interrupted by the watchdog. |
 | `caddy_javascript_queue_full_total` | counter | Requests rejected because the event queue was full. |
 | `caddy_javascript_reloads_total` | counter | Successful script reloads. |
 
@@ -714,6 +725,7 @@ Log messages to look for:
 - `javascript: reloaded script`
 - `javascript: reload failed, keeping previous script`
 - `javascript: handler error`
+- `javascript: async callback error`
 - `javascript: recovered from panic`
 - `javascript: file watching disabled`
 - `javascript: event queue full, dropping async callback`
@@ -858,7 +870,7 @@ spec.md              design target
 | `404` on a route you registered | Wrong path or method, or a handler returned without writing. Trailing slashes and case are ignored, so check for a typo or a missing `next()`. |
 | `404` for everything, no script errors | Script failed to load and the handler has no program, or the directive is in a `handle` block whose matcher does not match. |
 | `503 Service Unavailable` | Queue full. Raise `queue_size`, or find the slow handler blocking the loop. |
-| `504 Gateway Timeout` | `timeout` is too small, or the handler has an infinite loop. Async callbacks are not covered by the watchdog. |
+| `504 Gateway Timeout` | `timeout` is too small, or a handler or async callback has an infinite loop. |
 | `413` | Body exceeds `max_body`. Raise it or reject large uploads in Caddy. |
 | `fetch blocked: ...` | Host missing from `fetch_allow`, or `*` with a private resolution. Listed hosts are allowed verbatim. |
 | `fs` `ENOENT` | Wrong `root`. It defaults to the script's directory, not the Caddy working directory. |

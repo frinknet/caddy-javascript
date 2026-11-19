@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,12 +18,17 @@ import (
 var ErrBodyTooLarge = errors.New("request body too large")
 
 type RequestContext struct {
-	Method  string
-	Path    string
-	Host    string
-	Headers map[string][]string
-	Body    interface{}
-	Query   map[string][]string
+	Method      string
+	Path        string
+	Host        string
+	URL         string
+	OriginalURL string
+	IP          string
+	Protocol    string
+	Secure      bool
+	Headers     map[string][]string
+	Body        interface{}
+	Query       map[string][]string
 }
 
 func NewRequestContext(r *http.Request, maxBody int64) (*RequestContext, error) {
@@ -30,14 +36,35 @@ func NewRequestContext(r *http.Request, maxBody int64) (*RequestContext, error) 
 	if err != nil {
 		return nil, err
 	}
+	requestURL := r.URL.RequestURI()
+	secure := r.TLS != nil
+	protocol := "http"
+	if secure {
+		protocol = "https"
+	}
 	return &RequestContext{
-		Method:  r.Method,
-		Path:    r.URL.Path,
-		Host:    r.Host,
-		Headers: r.Header,
-		Body:    parseBody(body, r.Header.Get("Content-Type")),
-		Query:   r.URL.Query(),
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		Host:        r.Host,
+		URL:         requestURL,
+		OriginalURL: requestURL,
+		IP:          remoteIP(r.RemoteAddr),
+		Protocol:    protocol,
+		Secure:      secure,
+		Headers:     r.Header,
+		Body:        parseBody(body, r.Header.Get("Content-Type")),
+		Query:       r.URL.Query(),
 	}, nil
+}
+
+// remoteIP strips the port from RemoteAddr. A value that is not host:port is
+// returned unchanged, so a bare address still reaches the script.
+func remoteIP(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }
 
 func readBody(r *http.Request, maxBody int64) ([]byte, error) {
@@ -139,21 +166,44 @@ func (p *Program) BuildRequest(rc *RequestContext, params map[string]string) *so
 	_ = req.Set("path", rc.Path)
 	_ = req.Set("method", rc.Method)
 	_ = req.Set("host", rc.Host)
+	_ = req.Set("url", rc.URL)
+	_ = req.Set("originalUrl", rc.OriginalURL)
+	_ = req.Set("ip", rc.IP)
+	_ = req.Set("protocol", rc.Protocol)
+	_ = req.Set("secure", rc.Secure)
 	_ = req.Set("params", p.stringsObject(params))
 	_ = req.Set("headers", p.stringsObject(firstValues(rc.Headers)))
 	_ = req.Set("query", p.stringsObject(firstValues(rc.Query)))
 	_ = req.Set("queryAll", p.arraysObject(rc.Query))
 	_ = req.Set("body", p.toJSValue(rc.Body))
 
-	_ = req.Set("header", func(call sobek.FunctionCall) sobek.Value {
-		values, ok := rc.Headers[http.CanonicalHeaderKey(call.Argument(0).String())]
-		if !ok || len(values) == 0 {
+	header := func(call sobek.FunctionCall) sobek.Value {
+		value, ok := headerValue(rc.Headers, call.Argument(0).String())
+		if !ok {
 			return sobek.Undefined()
 		}
-		return p.rt.ToValue(values[0])
-	})
+		return p.rt.ToValue(value)
+	}
+	_ = req.Set("header", header)
+	_ = req.Set("get", header)
 
 	return req
+}
+
+// headerValue looks a header up case-insensitively, returning the first value.
+func headerValue(headers map[string][]string, name string) (string, bool) {
+	if values, ok := headers[http.CanonicalHeaderKey(name)]; ok {
+		if len(values) == 0 {
+			return "", false
+		}
+		return values[0], true
+	}
+	for key, values := range headers {
+		if len(values) > 0 && strings.EqualFold(key, name) {
+			return values[0], true
+		}
+	}
+	return "", false
 }
 
 func firstValues(m map[string][]string) map[string]string {

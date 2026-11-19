@@ -285,6 +285,12 @@ check "urlencoded repeated field keeps every value" POST /form --data 'a=1&a=2&b
 printf '%b' '\055-X\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n\055-X\r\nContent-Disposition: form-data; name="b"\r\n\r\n2\r\n\055-X--\r\n' >"$REQ/multipart"
 check "multipart body is parsed" POST /form --data-file "$REQ/multipart" --header 'Content-Type: multipart/form-data; boundary=X' --status 200 --ctype application/json --contains '"a":"1"'
 check "req.header reads a request header" GET /echoheader --header 'X-Test: hello' --status 200 --equals hello
+check "req.get is an alias of req.header" GET /request --header 'X-Test: hello' --status 200 --contains '"viaGet":"hello"'
+check "req.url keeps the query string" GET '/request?x=1' --status 200 --contains '"url":"/request?x=1"'
+check "req.originalUrl keeps the query string" GET '/request?x=1' --status 200 --contains '"originalUrl":"/request?x=1"'
+check "req.ip reports the client address" GET /request --status 200 --contains '"ip":"'
+check "req.protocol reports http without TLS" GET /request --status 200 --contains '"protocol":"http"'
+check "req.secure is false without TLS" GET /request --status 200 --contains '"secure":false'
 
 # ── Test 4: express routing ────────────────────────────
 echo ""
@@ -342,6 +348,8 @@ check "a missing fs file reports an error" GET /fs/missing --status 500 --contai
 check "path.join uses POSIX semantics" GET /path/join --status 200 --equals 'a/c'
 check "setTimeout completes the response" GET /timer --status 200 --equals 'timer fired'
 check "setInterval and clearInterval complete the response" GET /interval --status 200 --equals 'interval 2'
+check "a runaway async callback times out" GET /timer/spin --status 504 --equals 'Gateway Timeout'
+check "the loop serves requests after an async timeout" GET /hello --status 200 --equals 'hello world'
 
 # ── Test 7: security ───────────────────────────────────
 echo ""

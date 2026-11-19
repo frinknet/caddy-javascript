@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,7 @@ type Exchange struct {
 	pending  int32
 	returned int32
 	handled  int32
+	timedOut int32
 	once     sync.Once
 	Done     chan struct{}
 
@@ -128,6 +130,17 @@ func (e *Exchange) Handled() bool {
 	return atomic.LoadInt32(&e.handled) == 1
 }
 
+// SetTimedOut marks the exchange as abandoned because a callback exceeded the
+// execution budget. The request is finished immediately so a runaway callback
+// cannot hold the slot open.
+func (e *Exchange) SetTimedOut() {
+	atomic.StoreInt32(&e.timedOut, 1)
+}
+
+func (e *Exchange) TimedOut() bool {
+	return atomic.LoadInt32(&e.timedOut) == 1
+}
+
 func (e *Exchange) Finish() {
 	e.once.Do(func() { close(e.Done) })
 }
@@ -153,24 +166,73 @@ func (p *Program) Serve(ex *Exchange, timeout time.Duration, fn func() error) er
 }
 
 func (p *Program) Run(timeout time.Duration, fn func() error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	return p.watch(timeout, fn)
+}
 
+// watch runs fn with a deadline and interrupts the runtime when it expires.
+// Callers must run it on the scheduler goroutine: the interrupt flag is global
+// to the runtime, so two overlapping watchdogs would interfere.
+func (p *Program) watch(timeout time.Duration, fn func() error) error {
+	_, err := p.watchDeadline(timeout, fn)
+	return err
+}
+
+// watchDeadline reports whether the deadline expired in addition to returning
+// fn's error, because a JS callback can swallow the interrupt it receives.
+func (p *Program) watchDeadline(timeout time.Duration, fn func() error) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	var expired int32
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		<-ctx.Done()
 		if ctx.Err() == context.DeadlineExceeded {
+			atomic.StoreInt32(&expired, 1)
 			p.rt.Interrupt("script execution timeout exceeded")
 		}
 	}()
+	defer func() {
+		cancel()
+		<-stopped
+		p.rt.ClearInterrupt()
+	}()
 
 	err := fn()
-	cancel()
-	<-stopped
-	p.rt.ClearInterrupt()
+	return atomic.LoadInt32(&expired) == 1, err
+}
+
+// watchAsync runs one async callback under the same watchdog as a handler
+// invocation. A callback that spins or blocks in a native call is interrupted
+// instead of wedging the shared event loop.
+func (p *Program) watchAsync(fn func()) (bool, error) {
+	timeout := p.cfg.Timeout
+	if timeout <= 0 {
+		fn()
+		return false, nil
+	}
+	return p.watchDeadline(timeout, func() error {
+		fn()
+		return nil
+	})
+}
+
+// asyncAbandoned records a callback that ran out of its budget and completes
+// the exchange, so the request finishes with a timeout instead of waiting on
+// callbacks that will never produce a response.
+func (p *Program) asyncAbandoned(ex *Exchange, err error) error {
+	if err == nil {
+		err = errAsyncTimeout
+	}
+	if ex != nil {
+		ex.SetTimedOut()
+		ex.SetError(err)
+		p.cancelTimers(ex)
+		ex.Finish()
+	}
 	return err
 }
+
+var errAsyncTimeout = errors.New("javascript: async callback timeout exceeded")
 
 func (p *Program) trackAsync() *Exchange {
 	ex := p.current
@@ -191,7 +253,12 @@ func (p *Program) submitAsync(ex *Exchange, fn func()) {
 				ex.maybeFinish()
 			}
 		}()
-		fn()
+		if timedOut, err := p.watchAsync(fn); timedOut {
+			err = p.asyncAbandoned(ex, err)
+			if p.logger != nil {
+				p.logger.Error("javascript: async callback error", zap.Error(err))
+			}
+		}
 	}
 
 	if p.sched == nil {

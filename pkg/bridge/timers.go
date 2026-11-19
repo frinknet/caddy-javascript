@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/grafana/sobek"
+	"go.uber.org/zap"
 )
 
 // jsTimer is a cancellable timer owned by the program. A timer holds one
@@ -59,6 +60,25 @@ func (p *Program) forgetTimer(id int64) {
 	delete(p.timers, id)
 }
 
+// cancelTimers stops every timer still attached to ex, so an abandoned
+// exchange cannot keep scheduling callbacks.
+func (p *Program) cancelTimers(ex *Exchange) {
+	if ex == nil {
+		return
+	}
+	p.timersMu.Lock()
+	ids := make([]int64, 0, len(p.timers))
+	for id, t := range p.timers {
+		if t.ex == ex {
+			ids = append(ids, id)
+		}
+	}
+	p.timersMu.Unlock()
+	for _, id := range ids {
+		p.clearTimer(id)
+	}
+}
+
 func (p *Program) clearTimer(id int64) {
 	p.timersMu.Lock()
 	t := p.timers[id]
@@ -76,7 +96,12 @@ func (p *Program) submitAs(ex *Exchange, fn func()) bool {
 		prev := p.current
 		p.current = ex
 		defer func() { p.current = prev }()
-		fn()
+		if timedOut, err := p.watchAsync(fn); timedOut {
+			err = p.asyncAbandoned(ex, err)
+			if p.logger != nil {
+				p.logger.Error("javascript: async callback error", zap.Error(err))
+			}
+		}
 	}
 	if p.sched.Submit(run) {
 		return true

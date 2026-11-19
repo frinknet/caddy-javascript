@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,95 @@ func TestRunInterruptsInfiniteLoop(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an interrupt error")
+	}
+}
+
+func TestAsyncTimerCallbackInterrupted(t *testing.T) {
+	fsys, err := files.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsys.Close() })
+
+	sched := &fakeScheduler{}
+	p := NewProgram(Config{Timeout: 50 * time.Millisecond, Quit: make(chan struct{})}, fsys, sched, nil)
+	if err := p.Load([]byte(`
+		app.get('/spin', function(req, res) {
+			setTimeout(function() { while (true) {} }, 0)
+		})
+	`)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	w := NewResponseWriter(rec)
+	ex := NewExchange(w)
+	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/spin"}, nil)
+	resObj := p.BuildResponse(w, reqObj)
+	layers, _ := p.Match("GET", "/spin")
+	if len(layers) == 0 {
+		t.Fatal("route not registered")
+	}
+	if err := p.Serve(ex, time.Second, func() error {
+		return p.RunChain(ex, layers, reqObj, resObj)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for sched.pending() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sched.pending() == 0 {
+		t.Fatal("timer callback was never queued")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		sched.run()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event loop is wedged by the async callback")
+	}
+
+	select {
+	case <-ex.Done:
+	default:
+		t.Fatal("exchange stayed open after the async timeout")
+	}
+	if !ex.TimedOut() {
+		t.Fatal("exchange did not record the async timeout")
+	}
+
+	if err := p.Run(time.Second, func() error {
+		_, e := p.rt.RunString("1 + 1")
+		return e
+	}); err != nil {
+		t.Fatalf("runtime poisoned after async interrupt: %v", err)
+	}
+}
+
+func TestSubmitAsyncInterruptsCallback(t *testing.T) {
+	p := newTestProgram(t, 50*time.Millisecond)
+	rec := httptest.NewRecorder()
+	ex := NewExchange(NewResponseWriter(rec))
+
+	p.current = ex
+	atomic.AddInt32(&ex.pending, 1)
+	p.submitAsync(ex, func() {
+		_, _ = p.rt.RunString("while (true) {}")
+	})
+
+	select {
+	case <-ex.Done:
+	default:
+		t.Fatal("exchange stayed open after the async timeout")
+	}
+	if !ex.TimedOut() {
+		t.Fatal("exchange did not record the async timeout")
 	}
 }
 
@@ -316,6 +406,77 @@ func TestRequestContextBodyParsing(t *testing.T) {
 	all := obj.Get("queryAll").ToObject(p.rt)
 	if got := all.Get("x").ToObject(p.rt).Get("1").String(); got != "2" {
 		t.Fatalf("queryAll.x[1] = %q", got)
+	}
+}
+
+func TestRequestContextRequestHelpers(t *testing.T) {
+	req := httptest.NewRequest("GET", "/a/b?x=1", nil)
+	req.RemoteAddr = "203.0.113.9:4321"
+	req.Header.Set("X-Test", "one")
+
+	rc, err := NewRequestContext(req, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := newTestProgram(t, time.Second)
+	obj := p.BuildRequest(rc, nil)
+
+	for name, want := range map[string]string{
+		"url":         "/a/b?x=1",
+		"originalUrl": "/a/b?x=1",
+		"ip":          "203.0.113.9",
+		"protocol":    "http",
+	} {
+		if got := obj.Get(name).String(); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := obj.Get("secure").ToBoolean(); got {
+		t.Fatalf("secure = %v, want false", got)
+	}
+
+	for _, name := range []string{"header", "get"} {
+		fn, ok := sobek.AssertFunction(obj.Get(name))
+		if !ok {
+			t.Fatalf("req.%s is not a function", name)
+		}
+		value, err := fn(obj, p.rt.ToValue("x-test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value.String() != "one" {
+			t.Fatalf("req.%s(x-test) = %q, want one", name, value.String())
+		}
+		missing, err := fn(obj, p.rt.ToValue("X-Missing"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !sobek.IsUndefined(missing) {
+			t.Fatalf("req.%s(X-Missing) = %q, want undefined", name, missing.String())
+		}
+	}
+}
+
+func TestRequestContextSecureOverTLS(t *testing.T) {
+	req := httptest.NewRequest("GET", "https://example.com/secure", nil)
+	req.RemoteAddr = "203.0.113.9"
+
+	rc, err := NewRequestContext(req, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := newTestProgram(t, time.Second)
+	obj := p.BuildRequest(rc, nil)
+	if got := obj.Get("protocol").String(); got != "https" {
+		t.Fatalf("protocol = %q, want https", got)
+	}
+	if !obj.Get("secure").ToBoolean() {
+		t.Fatal("secure = false, want true")
+	}
+	if got := obj.Get("ip").String(); got != "203.0.113.9" {
+		t.Fatalf("ip = %q, want 203.0.113.9", got)
 	}
 }
 

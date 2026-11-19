@@ -112,6 +112,17 @@ app.get('/echoheader', (req, res) => {
   res.send(req.header('X-Test'))
 })
 
+app.get('/request', (req, res) => {
+  res.json({
+    url: req.url,
+    originalUrl: req.originalUrl,
+    ip: req.ip,
+    protocol: req.protocol,
+    secure: req.secure,
+    viaGet: req.get('X-Test') || null
+  })
+})
+
 app.get('/env', (req, res) => {
   res.json({
     secret: process.env.E2E_SECRET || null,
@@ -313,6 +324,12 @@ app.get('/interval', (req, res) => {
       clearInterval(id)
       res.send('interval ' + ticks)
     }
+  }, 10)
+})
+
+app.get('/timer/spin', (req, res) => {
+  setTimeout(() => {
+    while (true) {}
   }, 10)
 })
 
