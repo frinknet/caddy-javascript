@@ -7,19 +7,11 @@ import (
 	"github.com/frinknet/caddy-javascript/pkg/metric"
 )
 
-// Job is one unit of background work. The payload is already serialized so a
-// request runtime can hand it over without sharing live objects.
-type Job struct {
-	ID      string
-	Name    string
-	Payload []byte
-}
-
 // Queue is the bounded admission point shared by every job producer. It is the
 // only place that decides whether a job enters the supervisor; a full queue is
 // counted and reported to the caller.
 type Queue struct {
-	items  chan Job
+	items  chan *Job
 	stop   chan struct{}
 	once   sync.Once
 	mu     sync.RWMutex
@@ -32,14 +24,17 @@ func NewQueue(size int) (*Queue, error) {
 		return nil, fmt.Errorf("job queue size must be at least 1")
 	}
 	return &Queue{
-		items: make(chan Job, size),
+		items: make(chan *Job, size),
 		stop:  make(chan struct{}),
 	}, nil
 }
 
 // Admit offers a job without blocking. It reports false when the queue is full
 // or shutting down; a full queue is counted once per rejected job.
-func (q *Queue) Admit(job Job) bool {
+func (q *Queue) Admit(job *Job) bool {
+	if job == nil {
+		return false
+	}
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	if q.closed {
@@ -56,7 +51,7 @@ func (q *Queue) Admit(job Job) bool {
 
 // Next returns the next job in FIFO order. It reports false once the queue is
 // closed and drained.
-func (q *Queue) Next() (Job, bool) {
+func (q *Queue) Next() (*Job, bool) {
 	select {
 	case job := <-q.items:
 		return job, true
@@ -65,7 +60,7 @@ func (q *Queue) Next() (Job, bool) {
 		case job := <-q.items:
 			return job, true
 		default:
-			return Job{}, false
+			return nil, false
 		}
 	}
 }
@@ -78,6 +73,16 @@ func (q *Queue) Close() {
 		close(q.stop)
 		q.mu.Unlock()
 	})
+}
+
+// Done is closed when the queue stops admitting jobs.
+func (q *Queue) Done() <-chan struct{} { return q.stop }
+
+// Closed reports whether Close has been called.
+func (q *Queue) Closed() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.closed
 }
 
 // Len reports the number of jobs waiting, excluding one in flight.

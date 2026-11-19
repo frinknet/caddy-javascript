@@ -5,6 +5,7 @@ package jobs
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -22,8 +23,10 @@ type Hooks struct {
 }
 
 // Executor runs one job on the resident event loop. It is called only from
-// that goroutine. A nil executor consumes jobs without running JavaScript.
-type Executor func(*bridge.Program, Job)
+// that goroutine. A nil return acks the job; an error fails the attempt and
+// schedules a retry when attempts remain. A nil executor consumes jobs as
+// acknowledged without running JavaScript.
+type Executor func(*bridge.Program, *Job) error
 
 // Runtime is the resident background runtime. Its event loop goroutine is the
 // only goroutine that touches the Program.
@@ -91,13 +94,12 @@ func Start(src []byte, cfg bridge.Config, fsys *files.FS, logger *zap.Logger, qu
 
 // Enqueue admits a job for the resident runtime. It never blocks and reports
 // false when the bounded queue is full or shutting down.
-func (r *Runtime) Enqueue(job Job) bool {
+func (r *Runtime) Enqueue(job *Job) bool {
 	return r.queue.Admit(job)
 }
 
-// work is the supervisor goroutine: it pulls one job at a time and re-enters
-// the runtime through the scheduler, waiting for each callback so the event
-// loop always gets a chance to run other work.
+// work is the supervisor goroutine: it pulls one job at a time, runs its
+// attempt through the scheduler, and re-admits failed jobs after their backoff.
 func (r *Runtime) work() {
 	defer close(r.workerDone)
 	for {
@@ -105,23 +107,100 @@ func (r *Runtime) work() {
 		if !ok {
 			return
 		}
-		r.dispatch(job)
+		r.run(job)
 	}
 }
 
-func (r *Runtime) dispatch(job Job) {
-	done := make(chan struct{})
-	if !r.loop.Submit(func() {
-		defer close(done)
-		if r.exec == nil {
-			return
-		}
-		r.exec(r.prog, job)
-	}) {
-		metric.QueueFull.Inc()
+func (r *Runtime) run(job *Job) {
+	if job == nil {
 		return
 	}
-	<-done
+
+	if err := job.Start(); err != nil {
+		r.logSkipped(job, err)
+		return
+	}
+
+	if err := r.dispatch(job); err != nil {
+		if _, ferr := job.Fail(err); ferr != nil {
+			r.logSkipped(job, ferr)
+		}
+	} else if err := job.Ack(); err != nil {
+		r.logSkipped(job, err)
+	}
+
+	if job.State() != StateRetrying {
+		return
+	}
+
+	if !r.waitRetry(job) {
+		job.Cancel()
+		return
+	}
+
+	if !r.queue.Admit(job) {
+		if r.queue.Closed() {
+			job.Cancel()
+			return
+		}
+		job.Abandon(ErrJobQueueFull)
+	}
+}
+
+// dispatch runs one attempt on the event loop and waits for it, so jobs never
+// overlap on the resident runtime.
+func (r *Runtime) dispatch(job *Job) error {
+	if r.exec == nil {
+		return nil
+	}
+
+	done := make(chan error, 1)
+	if !r.loop.Submit(func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("javascript: job %s panicked: %v", job.ID, recovered)
+			}
+		}()
+		done <- r.exec(r.prog, job)
+	}) {
+		metric.QueueFull.Inc()
+		return ErrJobQueueFull
+	}
+	return <-done
+}
+
+// waitRetry sleeps for the job's backoff, shortened so an expired deadline is
+// noticed promptly. It reports false when the runtime is shutting down.
+func (r *Runtime) waitRetry(job *Job) bool {
+	delay := job.RetryDelay()
+	if !job.Deadline.IsZero() {
+		if remaining := time.Until(job.Deadline); remaining < delay {
+			delay = remaining
+		}
+	}
+	if delay <= 0 {
+		return true
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-r.queue.Done():
+		return false
+	}
+}
+
+func (r *Runtime) logSkipped(job *Job, err error) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Debug("javascript: job not advanced",
+		zap.String("job_id", job.ID),
+		zap.String("job", job.Name),
+		zap.String("state", job.State().String()),
+		zap.Error(err))
 }
 
 // Stop unloads the resident program and stops its event loop, draining work

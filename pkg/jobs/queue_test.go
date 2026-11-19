@@ -24,14 +24,17 @@ func TestQueueAdmitsUpToBound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !q.Admit(Job{Name: "a"}) {
+	if !q.Admit(NewJob("a", nil)) {
 		t.Fatal("first job was rejected")
 	}
-	if !q.Admit(Job{Name: "b"}) {
+	if !q.Admit(NewJob("b", nil)) {
 		t.Fatal("second job was rejected")
 	}
-	if q.Admit(Job{Name: "c"}) {
+	if q.Admit(NewJob("c", nil)) {
 		t.Fatal("job over the bound was admitted")
+	}
+	if q.Admit(nil) {
+		t.Fatal("a nil job was admitted")
 	}
 	if got := q.Len(); got != 2 {
 		t.Fatalf("queue length = %d, want 2", got)
@@ -43,12 +46,12 @@ func TestQueueCountsFullRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !q.Admit(Job{Name: "a"}) {
+	if !q.Admit(NewJob("a", nil)) {
 		t.Fatal("first job was rejected")
 	}
 
 	before := counterValue(t, metric.QueueFull)
-	if q.Admit(Job{Name: "b"}) {
+	if q.Admit(NewJob("b", nil)) {
 		t.Fatal("job over the bound was admitted")
 	}
 	if after := counterValue(t, metric.QueueFull); after != before+1 {
@@ -61,13 +64,21 @@ func TestQueueDrainsAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !q.Admit(Job{Name: "a"}) || !q.Admit(Job{Name: "b"}) {
+	if !q.Admit(NewJob("a", nil)) || !q.Admit(NewJob("b", nil)) {
 		t.Fatal("failed to fill the queue")
 	}
 
 	q.Close()
-	if q.Admit(Job{Name: "c"}) {
+	if q.Admit(NewJob("c", nil)) {
 		t.Fatal("queue admitted a job after close")
+	}
+	if !q.Closed() {
+		t.Fatal("queue reported open after close")
+	}
+	select {
+	case <-q.Done():
+	default:
+		t.Fatal("Done was not closed after Close")
 	}
 
 	seen := 0

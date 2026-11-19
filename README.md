@@ -820,8 +820,28 @@ startup, so top-level side effects such as file writes happen twice.
 The background runtime owns a bounded FIFO for jobs, sized by `queue_size`. A
 single supervisor goroutine hands one job at a time to its event loop, so jobs
 never run concurrently with one another. Admission never blocks: a full queue
-rejects the job and increments `caddy_javascript_queue_full_total`. No
-JavaScript API can enqueue or process a job yet.
+rejects the job and increments `caddy_javascript_queue_full_total`.
+
+Each job carries a stable random id, a worker name, a serialized payload, a
+generation, an optional absolute deadline, an async budget, and a retry policy
+(`MaxAttempts`, `Backoff`). The supervisor drives the Go-side lifecycle:
+
+- `pending` moves to `running` when an attempt starts, and the attempt count
+  grows with each start.
+- An executor that returns nil acks the job (`succeeded`); an error fails the
+  attempt.
+- A failed job retries while attempts remain, moving to `retrying` and waiting
+  an exponential backoff (the base delay doubled per attempt, capped at 30s)
+  before re-admission. The default policy is a single attempt, so retries are
+  opt-in.
+- `Cancel` stops a pending, retrying, or running job and cancels its context.
+  The context is rooted at `context.Background`, so cancellation is independent
+  of the request that produced the job.
+- A job whose deadline passed before it starts fails without running. A
+  deadline reached before a retry fails the job instead of retrying it, and the
+  job context expires with the deadline.
+
+No JavaScript API can enqueue or process a job yet.
 
 ## Status codes and errors
 
