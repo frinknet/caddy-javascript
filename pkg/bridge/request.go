@@ -30,6 +30,12 @@ type RequestContext struct {
 	Headers     map[string][]string
 	Body        interface{}
 	Query       map[string][]string
+
+	// RawBody is the request body as read, kept so a script body parser can
+	// apply its own limit and type rules. ContentType is the header it was
+	// parsed with.
+	RawBody     []byte
+	ContentType string
 }
 
 func NewRequestContext(r *http.Request, maxBody int64) (*RequestContext, error) {
@@ -55,6 +61,8 @@ func NewRequestContext(r *http.Request, maxBody int64) (*RequestContext, error) 
 		Headers:     r.Header,
 		Body:        parseBody(body, r.Header.Get("Content-Type")),
 		Query:       r.URL.Query(),
+		RawBody:     body,
+		ContentType: r.Header.Get("Content-Type"),
 	}, nil
 }
 
@@ -164,6 +172,7 @@ func urlValues(values url.Values) map[string]interface{} {
 
 func (p *Program) BuildRequest(rc *RequestContext, params map[string]string) *sobek.Object {
 	req := p.rt.NewObject()
+	_ = req.SetSymbol(p.reqSymbol, rc)
 	_ = req.Set("path", rc.Path)
 	_ = req.Set("method", rc.Method)
 	_ = req.Set("host", rc.Host)

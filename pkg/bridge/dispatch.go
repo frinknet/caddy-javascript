@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/grafana/sobek"
@@ -198,11 +199,19 @@ func (c *Chain) errorValue(err error) sobek.Value {
 	return c.p.rt.ToValue(err.Error())
 }
 
+// report finishes the exchange after the chain ends. An error that carries an
+// HTTP status, as body-parser produces for a rejected body, answers with that
+// status; anything else is reported so the caller can answer 500.
 func (c *Chain) report() {
 	if c.ex == nil || c.errMsg == "" {
 		return
 	}
 	if c.ex.Writer().Written() {
+		return
+	}
+	if status := statusOf(c.pending, c.p.rt); status != 0 {
+		http.Error(c.ex.Writer(), http.StatusText(status), status)
+		c.ex.SetHandled(true)
 		return
 	}
 	c.ex.SetError(errors.New(c.errMsg))

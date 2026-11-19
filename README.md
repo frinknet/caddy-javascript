@@ -55,8 +55,9 @@ app.use((req, res) => {
   parameters, optional segments, wildcards, mounted routers, and static file
   middleware.
 - Express-compatible body parsing: `express.json()`, `express.urlencoded()`,
-  `express.text()`, `express.raw()`, and `require('body-parser')`, plus
-  application settings and `app.locals`.
+  `express.text()`, `express.raw()`, and `require('body-parser')` with the
+  `limit`, `type`, `strict`, and `verify` options, plus application settings and
+  `app.locals`.
 - Request and response helpers: JSON and form bodies, query strings, cookies,
   headers, status codes, redirects, content types, `res.download`,
   `res.format`, and `res.vary`.
@@ -297,8 +298,21 @@ app.listen(3000)
 
 `express.json()`, `express.urlencoded()`, `express.text()`, `express.raw()`,
 and `require('body-parser')` return middleware. Bodies are already parsed from
-`Content-Type` before the handler runs, so these middleware are accepted for
-compatibility and simply continue the chain.
+`Content-Type` before the handler runs; these middleware re-parse the body under
+their own rules when the content type matches. Each accepts the body-parser
+options:
+
+| Option | Behavior |
+|---|---|
+| `limit` | Byte count or size string (`'100kb'`, `'1mb'`, `512`). Defaults to `100kb`. A larger body fails with `413` and `err.type === 'entity.too.large'`. |
+| `type` | Content type to accept: a string with `*` wildcards (`'application/*'`, `'*/json'`), a bare subtype (`'json'`), a function `(req) => boolean`, or an array of these. An unmatched request runs the next layer with `req.body` untouched. Defaults to `application/json`, `application/x-www-form-urlencoded`, `text/plain`, and `application/octet-stream` respectively. |
+| `strict` | `express.json` only, default `true`. Accepts only objects and arrays; a scalar fails with `400` and `err.type === 'entity.parse.failed'`. |
+| `verify` | `(req, res, buf)` called with the raw body as a `Buffer` before parsing. Throwing fails the request with the error's `status` when set, otherwise `403`. |
+
+A failed parse reaches `next(err)` with `err.status`/`err.statusCode` and
+`err.type`, so an error handler can answer it. Without one, the response uses
+that status, the way Express's final handler does. An empty body becomes `{}`
+for `json`/`urlencoded` and `''` for `text`/`raw`.
 
 Layers run in registration order, the way Express runs its stack. A handler
 advances the chain with `next()`, and `next(err)` skips ahead to the next error
@@ -323,7 +337,8 @@ Paths:
   exist.
 
 An error that no error handler takes is reported as `500 Internal Server
-Error`, unless a response was already written.
+Error`, unless it carries an HTTP status in `err.status` or `err.statusCode`, as
+the body parser errors do; then that status answers the request.
 
 ### Routers: `express.Router()`
 
@@ -432,7 +447,8 @@ Body parsing is driven by `Content-Type`:
 | empty body | `null`. |
 
 Requests larger than `max_body` are rejected with `413` before the script runs.
-Reading the body can fail earlier; that returns `400`.
+Reading the body can fail earlier; that returns `400`. The parser middleware
+above add their own, smaller checks; see their options.
 
 ### Response: `res`
 
@@ -751,7 +767,9 @@ script is written, created, or renamed, debounced by 200ms.
 | No route or middleware matched, `fallthrough` on | Next HTTP handler. |
 | Route matched, handler wrote nothing | `404 Not Found`. |
 | Script throws or calls `next(err)`, nothing written | `500 Internal Server Error`. |
+| `next(err)` with `err.status` or `err.statusCode`, nothing written | That status, with its plain text. |
 | `next(err)` reaches an error handler | Whatever the error handler sent. |
+| A body parser rejects the body, no error handler | `400`, `403`, or `413` from the error's status. |
 | Handler exceeds `timeout`, nothing written | `504 Gateway Timeout`. |
 | Handler exceeds `timeout` after writing | Partial response stands, error logged. |
 | Async callback exceeds `timeout`, nothing written | `504 Gateway Timeout`; its timers are cancelled. |

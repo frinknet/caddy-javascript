@@ -55,6 +55,8 @@ type Program struct {
 	routers map[*sobek.Object]*router.Table
 	statics map[*sobek.Object]*router.Static
 
+	reqSymbol *sobek.Symbol
+
 	esmMu    sync.Mutex
 	esmPaths map[sobek.ModuleRecord]string
 	esmCache map[string]sobek.ModuleRecord
@@ -78,6 +80,7 @@ func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger)
 		esmPaths: make(map[sobek.ModuleRecord]string),
 		esmCache: make(map[string]sobek.ModuleRecord),
 	}
+	p.reqSymbol = sobek.NewSymbol("requestContext")
 	p.registerEnvironment()
 	return p
 }

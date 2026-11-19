@@ -77,21 +77,18 @@ func (p *Program) registerApp() {
 	_ = expressObj.Set("static", func(call sobek.FunctionCall) sobek.Value {
 		return p.newStatic(call)
 	})
-	for _, name := range []string{"json", "urlencoded", "text", "raw"} {
+	for name, kind := range map[string]bodyKind{
+		"json":       bodyJSON,
+		"urlencoded": bodyURLEncoded,
+		"text":       bodyText,
+		"raw":        bodyRaw,
+	} {
+		kind := kind
 		_ = expressObj.Set(name, func(call sobek.FunctionCall) sobek.Value {
-			return p.bodyParserMiddleware()
+			return p.bodyParserMiddleware(kind, call.Argument(0))
 		})
 	}
 	p.expressObj = expressObj
-}
-
-func (p *Program) bodyParserMiddleware() sobek.Value {
-	return p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
-		if next, ok := sobek.AssertFunction(call.Argument(2)); ok {
-			_, _ = next(sobek.Undefined())
-		}
-		return sobek.Undefined()
-	})
 }
 
 // installRoutes gives an object the route registration surface. The app and

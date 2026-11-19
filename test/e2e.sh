@@ -284,6 +284,13 @@ check "urlencoded body is parsed" POST /form --data 'a=1&b=2' --header 'Content-
 check "urlencoded repeated field keeps every value" POST /form --data 'a=1&a=2&b=3' --header 'Content-Type: application/x-www-form-urlencoded' --status 200 --ctype application/json --contains '"a":["1","2"]'
 printf '%b' '\055-X\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n\055-X\r\nContent-Disposition: form-data; name="b"\r\n\r\n2\r\n\055-X--\r\n' >"$REQ/multipart"
 check "multipart body is parsed" POST /form --data-file "$REQ/multipart" --header 'Content-Type: multipart/form-data; boundary=X' --status 200 --ctype application/json --contains '"a":"1"'
+check "express.json parses a JSON body" POST /parser --data '{"a":1}' --header 'Content-Type: application/json' --status 200 --equals '{"a":1}'
+check "express.json rejects malformed JSON with 400" POST /parser --data '{"a":' --header 'Content-Type: application/json' --status 400 --contains 'Bad Request'
+check "express.json strict mode rejects a scalar" POST /parser --data '"text"' --header 'Content-Type: application/json' --status 400
+check "express.json strict:false accepts a scalar" POST /parser-loose --data '"text"' --header 'Content-Type: application/json' --status 200 --equals '"text"'
+check "express.json limit answers 413" POST /parser-limit --data '{"abcdefgh":1}' --header 'Content-Type: application/json' --status 413 --contains 'Request Entity Too Large'
+check "express.json verify accepts a JSON body" POST /parser-verify --data '{"ok":true}' --header 'Content-Type: application/json' --status 200 --equals '{"ok":true}'
+check "express.json verify can reject a body" POST /parser-verify --data '{"ok":false}' --header 'Content-Type: application/json' --status 422 --contains 'Unprocessable Entity'
 check "req.header reads a request header" GET /echoheader --header 'X-Test: hello' --status 200 --equals hello
 check "req.get is an alias of req.header" GET /request --header 'X-Test: hello' --status 200 --contains '"viaGet":"hello"'
 check "req.url keeps the query string" GET '/request?x=1' --status 200 --contains '"url":"/request?x=1"'

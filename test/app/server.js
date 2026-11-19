@@ -114,6 +114,30 @@ app.post('/form', (req, res) => {
   res.json(req.body)
 })
 
+app.post('/parser', express.json(), (req, res) => {
+  res.json(req.body)
+})
+
+app.post('/parser-loose', express.json({ strict: false }), (req, res) => {
+  res.json(req.body)
+})
+
+app.post('/parser-limit', express.json({ limit: '10b' }), (req, res) => {
+  res.json(req.body)
+})
+
+app.post('/parser-verify', express.json({
+  verify: (req, res, buf) => {
+    if (buf.toString() !== '{"ok":true}') {
+      const err = new Error('rejected body')
+      err.status = 422
+      throw err
+    }
+  }
+}), (req, res) => {
+  res.json(req.body)
+})
+
 app.get('/echoheader', (req, res) => {
   res.send(req.header('X-Test'))
 })
