@@ -60,7 +60,8 @@ app.use((req, res) => {
   `app.locals`.
 - Request and response helpers: JSON and form bodies, query strings, cookies,
   headers, status codes, redirects, content types, `res.download`,
-  `res.format`, and `res.vary`.
+  `res.render` with registered or required view engines, `res.format`, and
+  `res.vary`.
 - Async route handling: handlers may be `async` functions and promises returned
   by a handler keep the request open.
 - Module support: CommonJS `require` with `node_modules` resolution, ES modules
@@ -281,6 +282,8 @@ the defaults listed above.
 | `app.get(name)` | Read a setting when called with one argument. |
 | `app.enable(name)` / `app.disable(name)` | Set a boolean setting. |
 | `app.enabled(name)` / `app.disabled(name)` | Read a boolean setting. |
+| `app.engine(ext, fn)` | Register a view engine for an extension such as `'html'` or `'.html'`. |
+| `app.render(name[, options], cb)` | Render a view and call `cb(err, html)`. |
 | `app.locals` | Application-local values shared with every request. |
 | `app.listen(...)` | No-op that returns the app. Caddy owns the listener. |
 
@@ -339,6 +342,42 @@ Paths:
 An error that no error handler takes is reported as `500 Internal Server
 Error`, unless it carries an HTTP status in `err.status` or `err.statusCode`, as
 the body parser errors do; then that status answers the request.
+
+### Views: `res.render()`
+
+```js
+const fs = require('fs')
+
+app.engine('html', (file, options, cb) => {
+  fs.readFile(file, (err, text) => {
+    if (err) return cb(err)
+    cb(null, text.replace('{{title}}', options.title))
+  })
+})
+app.set('views', 'views')
+app.set('view engine', 'html')
+
+app.get('/', (req, res) => {
+  res.render('index', { title: 'Home' })
+})
+```
+
+`res.render(view[, options][, cb])` resolves the view below the `views`
+setting (`"views"` in the sandbox root by default; a directory string or an
+array of them, looked up in order), appends the `view engine` extension when
+the name has none, and calls its engine with `(file, options, cb)`. Options
+merge `app.locals`, then `res.locals`, then the caller's object;
+`options.settings` exposes the app settings and `options._locals` the response
+locals.
+
+Without a callback the rendered HTML is sent as `text/html` and a rendered
+error goes to `next(err)`. With a callback the HTML is only passed to
+`cb(err, html)`, so the handler decides what to send. `app.render` has the same
+engine and lookup rules but requires the callback and has no response locals.
+
+Engines can also be resolved with `require` from the extension, so a vendored
+engine module exporting `__express`, `renderFile`, or a function works without
+`app.engine` registration. Engines may finish asynchronously.
 
 ### Routers: `express.Router()`
 
@@ -476,6 +515,7 @@ above add their own, smaller checks; see their options.
 | `res.download(name[, filename][, opts][, cb])` | Serve a file as an attachment. |
 | `res.format(obj)` | Negotiate the `Accept` header and invoke the matching callback. |
 | `res.vary(field)` | Add a `Vary` header. Chainable. |
+| `res.render(view[, options][, cb])` | Render a view with the registered engine. Without `cb`, send the result as `text/html`. |
 | `res.sendFile(name[, opts][, cb])` | Serve a file from the sandbox. Options: `root` (paths are confined to it; a bare string is accepted as the root), `headers` (extra response headers), `maxAge` (milliseconds, sets `Cache-Control`), and `dotfiles` (`ignore` by default, or `deny`). A missing or refused file answers `404`, or calls `cb(err)` when given. Reads are asynchronous and bodies are skipped for `HEAD`. |
 | `res.flush()` | Flush the underlying `http.ResponseWriter` when it supports it. |
 
@@ -881,15 +921,9 @@ not exposed outside the container by default.
 Not implemented today:
 
 - npm installation.
-- View engines and `res.render`.
 - `next('router')`.
 - Server-side streaming responses, SSE, and WebSocket upgrades.
 - Request-level cancellation of async work.
-
-Body parsers are compatibility middleware: request bodies are parsed from
-`Content-Type` before handlers run, so parser options such as `limit` and
-`strict` are not applied. Use the directive's `max_body` option for a request
-body limit.
 
 `spec.md` describes the design target and the intended Express parity.
 

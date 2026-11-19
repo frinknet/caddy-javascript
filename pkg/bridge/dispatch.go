@@ -37,6 +37,9 @@ func (p *Program) RunChain(ex *Exchange, layers []*router.Layer, req, res *sobek
 	c.next = p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
 		return c.advance(call.Argument(0))
 	})
+	if res != nil {
+		_ = res.SetSymbol(renderNextSymbol, c.next)
+	}
 	return c.step(sobek.Undefined())
 }
 

@@ -124,6 +124,22 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 		_ = req.Set("app", p.appObj)
 	}
 
+	_ = res.Set("render", func(call sobek.FunctionCall) sobek.Value {
+		name := call.Argument(0).String()
+		var options *sobek.Object
+		if len(call.Arguments) > 1 && !isNilValue(call.Argument(1)) {
+			if _, ok := sobek.AssertFunction(call.Argument(1)); !ok {
+				options = call.Argument(1).ToObject(p.rt)
+			}
+		}
+		var cb sobek.Callable
+		if len(call.Arguments) > 1 {
+			cb, _ = sobek.AssertFunction(call.Argument(len(call.Arguments) - 1))
+		}
+		p.renderView(w, res, name, options, cb)
+		return res
+	})
+
 	_ = res.Set("status", func(call sobek.FunctionCall) sobek.Value {
 		w.SetStatus(int(call.Argument(0).ToInteger()))
 		return res

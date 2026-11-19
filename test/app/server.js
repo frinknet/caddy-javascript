@@ -414,6 +414,19 @@ app.get('/timer/spin', (req, res) => {
   }, 10)
 })
 
+app.engine('html', function (file, opts, cb) {
+  fs.readFile(file, function (err, text) {
+    if (err) return cb(err)
+    cb(null, text.replace('{{name}}', opts.name))
+  })
+})
+app.set('views', 'views')
+app.set('view engine', 'html')
+app.get('/render', (req, res) => {
+  res.locals.name = 'locals'
+  res.render('hello', { name: 'e2e' })
+})
+
 app.use((req, res) => {
   res.status(404).send('not found')
 })

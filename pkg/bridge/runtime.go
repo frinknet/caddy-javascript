@@ -44,6 +44,8 @@ type Program struct {
 	fsObj          *sobek.Object
 	pathObj        *sobek.Object
 	appObj         *sobek.Object
+	settings       *sobek.Object
+	engines        *sobek.Object
 	expressObj     *sobek.Object
 	bufferObj      *sobek.Object
 	urlObj         *sobek.Object

@@ -22,6 +22,10 @@ func (p *Program) registerApp() {
 		env = "development"
 	}
 	_ = settings.Set("env", env)
+	_ = settings.Set("views", "views")
+	engines := p.rt.NewObject()
+	p.settings = settings
+	p.engines = engines
 	p.installRoutes(app, p.routes, "app")
 	routeGet := app.Get("get")
 	_ = app.Set("get", func(call sobek.FunctionCall) sobek.Value {
@@ -61,6 +65,36 @@ func (p *Program) registerApp() {
 		return p.rt.ToValue(value == nil || !value.ToBoolean())
 	})
 	_ = app.Set("locals", locals)
+	_ = app.Set("engines", engines)
+	_ = app.Set("engine", func(call sobek.FunctionCall) sobek.Value {
+		ext := normalizeViewExt(call.Argument(0).String())
+		if ext == "" {
+			panic(p.rt.NewTypeError("app.engine requires an extension"))
+		}
+		if _, ok := sobek.AssertFunction(call.Argument(1)); !ok {
+			panic(p.rt.NewTypeError("app.engine requires a function"))
+		}
+		_ = engines.Set(ext, call.Argument(1))
+		return app
+	})
+	_ = app.Set("render", func(call sobek.FunctionCall) sobek.Value {
+		name := call.Argument(0).String()
+		var options *sobek.Object
+		if len(call.Arguments) > 1 && !isNilValue(call.Argument(1)) {
+			if _, ok := sobek.AssertFunction(call.Argument(1)); !ok {
+				options = call.Argument(1).ToObject(p.rt)
+			}
+		}
+		var cb sobek.Callable
+		if len(call.Arguments) > 1 {
+			cb, _ = sobek.AssertFunction(call.Argument(len(call.Arguments) - 1))
+		}
+		if cb == nil {
+			panic(p.rt.NewTypeError("app.render requires a callback"))
+		}
+		p.renderView(nil, nil, name, options, cb)
+		return sobek.Undefined()
+	})
 	_ = app.Set("listen", func(call sobek.FunctionCall) sobek.Value {
 		return app
 	})

@@ -271,6 +271,7 @@ check "res.location('back') uses the referer" GET /location-back --header 'Refer
 check "res.cookie sets an encoded cookie with options" GET /cookie --status 200 --equals ok --hdr-contains Set-Cookie 'sid=a%20b' --hdr-contains Set-Cookie 'Path=/app' --hdr-contains Set-Cookie 'Max-Age=60' --hdr-contains Set-Cookie 'HttpOnly' --hdr-contains Set-Cookie 'SameSite=Lax'
 check "res.sendStatus sends the status text" GET /sendstatus --status 418 --ctype text/plain --equals "I'm a teapot"
 check "res.flush keeps the response writable" GET /flush --status 200 --ctype text/plain --equals flushed
+check "res.render runs a view engine and sends HTML" GET /render --status 200 --ctype text/html --equals 'Hello e2e'
 check "res.sendFile serves a rooted file with headers and max-age" GET /sendfile --status 200 --ctype text/plain --contains 'static hello' --hdr X-File yes --hdr Cache-Control 'public, max-age=60'
 check "res.sendFile answers HEAD with headers only" HEAD /sendfile-head --status 200 --ctype text/plain --hdr Content-Length 12
 check "res.sendFile on a missing file is a 404" GET /sendfile-missing --status 404
