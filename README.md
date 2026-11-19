@@ -170,7 +170,7 @@ takes one or more names.
 | script path | required | Resolved relative to the Caddy process working directory, then made absolute. |
 | `root` | script's directory | Sandbox root for `fs` and `path`. Also made absolute. |
 | `timeout` | `3s` | Go duration. Budget for each handler invocation and each async callback. `0` means the default. |
-| `queue_size` | `5000` | Number of queued tasks (requests plus async callbacks). |
+| `queue_size` | `5000` | Number of queued tasks per event-loop queue (requests, async callbacks, and background jobs). |
 | `async_budget` | `64` | Maximum outstanding async callbacks per request. Callbacks over the budget are rejected. |
 | `max_body` | `1048576` | Bytes. Larger bodies get `413`. `0` means the default. |
 | `watch` | on | `watch`, `watch true`, `watch false`. Watches the script's directory. |
@@ -817,6 +817,12 @@ until shutdown; no JavaScript API reaches it yet, and it is not reloaded with
 the request runtime. Top-level script code therefore runs once per runtime at
 startup, so top-level side effects such as file writes happen twice.
 
+The background runtime owns a bounded FIFO for jobs, sized by `queue_size`. A
+single supervisor goroutine hands one job at a time to its event loop, so jobs
+never run concurrently with one another. Admission never blocks: a full queue
+rejects the job and increments `caddy_javascript_queue_full_total`. No
+JavaScript API can enqueue or process a job yet.
+
 ## Status codes and errors
 
 | Situation | Response |
@@ -893,7 +899,7 @@ Caddy's Prometheus endpoint exposes:
 |---|---|---|
 | `caddy_javascript_requests_total{status}` | counter | Responses the handler completed, labelled by status. |
 | `caddy_javascript_timeouts_total` | counter | Handler invocations and async callbacks interrupted by the watchdog. |
-| `caddy_javascript_queue_full_total` | counter | Requests and callbacks rejected or dropped because the event queue was full. |
+| `caddy_javascript_queue_full_total` | counter | Requests, callbacks, and jobs rejected or dropped because a queue was full. |
 | `caddy_javascript_reloads_total` | counter | Successful script reloads. |
 
 Log messages to look for:

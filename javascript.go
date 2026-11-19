@@ -112,7 +112,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("javascript: failed to initialize runtime: %w", err)
 	}
 
-	h.background, err = jobs.Start(src, h.bridgeConfig(), h.fs, h.logger, h.QueueSize, jobs.Hooks{})
+	h.background, err = jobs.Start(src, h.bridgeConfig(), h.fs, h.logger, h.QueueSize, nil, jobs.Hooks{})
 	if err != nil {
 		h.loop.Stop()
 		return fmt.Errorf("javascript: failed to initialize background runtime: %w", err)
