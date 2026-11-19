@@ -67,7 +67,11 @@ func (p *Program) serveStaticFile(cfg *router.Static, rest, fullPath, method str
 		return
 	}
 
-	ex := p.trackAsync()
+	ex, terr := p.trackAsync()
+	if terr != nil {
+		next()
+		return
+	}
 	if ex == nil {
 		next()
 		return

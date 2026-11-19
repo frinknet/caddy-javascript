@@ -32,6 +32,16 @@ func (p *Program) builtin(name string) (sobek.Value, bool) {
 		return p.pathObj, true
 	case "express", "node:express":
 		return p.expressObj, true
+	case "buffer", "node:buffer":
+		return p.bufferObj, true
+	case "url", "node:url":
+		return p.urlObj, true
+	case "querystring", "node:querystring":
+		return p.querystringObj, true
+	case "util", "node:util":
+		return p.utilObj, true
+	case "events", "node:events":
+		return p.eventsVal, true
 	default:
 		return nil, false
 	}

@@ -3,6 +3,11 @@ const leftpad = require('leftpad')
 const data = require('./data.json')
 const fs = require('fs')
 const path = require('path')
+const { Buffer } = require('buffer')
+const url = require('url')
+const qs = require('querystring')
+const util = require('util')
+const EventEmitter = require('events')
 
 const BASE = 'http://127.0.0.1'
 
@@ -310,6 +315,24 @@ app.get('/fs/missing', (req, res) => {
 
 app.get('/path/join', (req, res) => {
   res.send(path.join('a', 'b', '..', 'c'))
+})
+
+app.get('/shims', (req, res) => {
+  const buf = Buffer.from('6869', 'hex')
+  const u = url.parse('http://example.com/a?b=c')
+  const q = qs.stringify({ x: '1', y: '2' })
+  const f = util.format('%s-%d', 'v', 2)
+  const e = new EventEmitter()
+  let seen = ''
+  e.on('ping', (v) => { seen += v })
+  e.emit('ping', 'ok')
+  res.json({
+    buffer: buf.toString(),
+    host: u.hostname,
+    query: q,
+    format: f,
+    events: seen
+  })
 })
 
 app.get('/timer', (req, res) => {

@@ -236,7 +236,13 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 
 	fail := func(err error) sobek.Value {
 		if hasCallback {
-			ex := p.trackAsync()
+			ex, terr := p.trackAsync()
+			if terr != nil {
+				p.submitAsync(nil, func() {
+					_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+				})
+				return sobek.Undefined()
+			}
 			p.submitAsync(ex, func() {
 				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
 			})
@@ -254,7 +260,13 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 	if options.signal != nil && options.signal.isAborted() {
 		reason := options.signal.getReason()
 		if hasCallback {
-			ex := p.trackAsync()
+			ex, terr := p.trackAsync()
+			if terr != nil {
+				p.submitAsync(nil, func() {
+					_, _ = cb(sobek.Undefined(), reason, sobek.Null())
+				})
+				return sobek.Undefined()
+			}
 			p.submitAsync(ex, func() {
 				_, _ = cb(sobek.Undefined(), reason, sobek.Null())
 			})
@@ -287,7 +299,17 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 	}
 	p.addAbortHook(options.signal, ctx, cancel)
 
-	ex := p.trackAsync()
+	ex, terr := p.trackAsync()
+	if terr != nil {
+		if hasCallback {
+			p.submitAsync(nil, func() {
+				_, _ = cb(sobek.Undefined(), p.rt.ToValue(terr.Error()), sobek.Null())
+			})
+			return sobek.Undefined()
+		}
+		_ = reject(p.rt.NewGoError(terr))
+		return p.rt.ToValue(promise)
+	}
 	go func() {
 		resp, err := client.Do(req)
 		if err != nil {
@@ -699,7 +721,12 @@ func (b *fetchBody) pump() {
 
 func (b *fetchBody) startRead(req fetchRead) {
 	b.reading = true
-	ex := b.p.trackAsync()
+	ex, terr := b.p.trackAsync()
+	if terr != nil {
+		b.reading = false
+		_ = req.reject(b.p.rt.NewGoError(terr))
+		return
+	}
 	go func() {
 		buf := make([]byte, fetchChunkSize)
 		n, err := b.src.Read(buf)
@@ -755,7 +782,11 @@ func (b *fetchBody) text() sobek.Value {
 	b.used = true
 	b.done = true
 
-	ex := b.p.trackAsync()
+	ex, terr := b.p.trackAsync()
+	if terr != nil {
+		_ = reject(b.p.rt.NewGoError(terr))
+		return b.p.rt.ToValue(promise)
+	}
 	go func() {
 		data, err := io.ReadAll(io.LimitReader(b.src, maxFetchBytes+1))
 		b.close()
@@ -787,7 +818,11 @@ func (b *fetchBody) arrayBuffer() sobek.Value {
 	b.used = true
 	b.done = true
 
-	ex := b.p.trackAsync()
+	ex, terr := b.p.trackAsync()
+	if terr != nil {
+		_ = reject(b.p.rt.NewGoError(terr))
+		return b.p.rt.ToValue(promise)
+	}
 	go func() {
 		data, err := io.ReadAll(io.LimitReader(b.src, maxFetchBytes+1))
 		b.close()

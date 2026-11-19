@@ -17,6 +17,7 @@ func (p *Program) registerEnvironment() {
 	p.registerPath()
 	p.registerTimers()
 	p.registerFetch()
+	p.registerShims()
 }
 
 func (p *Program) registerProcess() {
@@ -77,7 +78,13 @@ func (p *Program) registerFS() {
 			panic(p.rt.NewTypeError("fs.readFile requires a callback"))
 		}
 
-		ex := p.trackAsync()
+		ex, err := p.trackAsync()
+		if err != nil {
+			p.submitAsync(nil, func() {
+				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+			})
+			return sobek.Undefined()
+		}
 		go func() {
 			data, err := p.fs.ReadFile(name)
 			p.submitAsync(ex, func() {
@@ -99,7 +106,13 @@ func (p *Program) registerFS() {
 			panic(p.rt.NewTypeError("fs.writeFile requires a callback"))
 		}
 
-		ex := p.trackAsync()
+		ex, err := p.trackAsync()
+		if err != nil {
+			p.submitAsync(nil, func() {
+				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()))
+			})
+			return sobek.Undefined()
+		}
 		go func() {
 			err := p.fs.WriteFile(name, []byte(content), 0o644)
 			p.submitAsync(ex, func() {

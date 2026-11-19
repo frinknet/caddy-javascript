@@ -1,6 +1,7 @@
 package caddyjavascript
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/frinknet/caddy-javascript/pkg/bridge"
 	"github.com/frinknet/caddy-javascript/pkg/config"
+	"github.com/frinknet/caddy-javascript/pkg/eval"
 	"github.com/frinknet/caddy-javascript/pkg/files"
 	"github.com/frinknet/caddy-javascript/pkg/metric"
 	"github.com/frinknet/caddy-javascript/pkg/sched"
@@ -79,6 +81,10 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 	h.scriptPath = scriptPath
 
+	if h.Eval {
+		eval.Register(h.scriptPath, h)
+	}
+
 	initErr := make(chan error, 1)
 	go h.loop.Run(func() { h.reload() })
 
@@ -135,6 +141,9 @@ func (h *Handler) reload() {
 }
 
 func (h *Handler) Cleanup() error {
+	if h.Eval {
+		eval.Unregister(h.scriptPath)
+	}
 	if h.watcher != nil {
 		_ = h.watcher.Close()
 	}
@@ -258,11 +267,50 @@ func (h *Handler) serve(ex *bridge.Exchange, rc *bridge.RequestContext) {
 
 func (h *Handler) bridgeConfig() bridge.Config {
 	return bridge.Config{
-		Timeout:    time.Duration(h.Timeout),
-		EnvAllow:   h.EnvAllow,
-		FetchAllow: h.FetchAllow,
-		MaxBody:    h.MaxBody,
-		Quit:       h.loop.Quit(),
+		Timeout:     time.Duration(h.Timeout),
+		EnvAllow:    h.EnvAllow,
+		FetchAllow:  h.FetchAllow,
+		MaxBody:     h.MaxBody,
+		AsyncBudget: h.AsyncBudget,
+		Quit:        h.loop.Quit(),
+	}
+}
+
+// EvalCode runs code on the directive's event loop and returns the result. The
+// admin endpoint uses it for diagnostics; the directive must opt in with
+// `eval`.
+func (h *Handler) EvalCode(ctx context.Context, code string) (string, error) {
+	if !h.Eval {
+		return "", fmt.Errorf("eval is not enabled")
+	}
+	if h.loop == nil {
+		return "", fmt.Errorf("handler is not provisioned")
+	}
+	type result struct {
+		val string
+		err error
+	}
+	ch := make(chan result, 1)
+	if !h.loop.Submit(func() {
+		prog := h.prog
+		if prog == nil {
+			ch <- result{err: fmt.Errorf("runtime unavailable")}
+			return
+		}
+		v, err := prog.Runtime().RunString(code)
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		ch <- result{val: v.String()}
+	}) {
+		return "", fmt.Errorf("event queue full")
+	}
+	select {
+	case r := <-ch:
+		return r.val, r.err
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }
 

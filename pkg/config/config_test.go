@@ -12,6 +12,9 @@ func TestApplyDefaults(t *testing.T) {
 	if o.QueueSize != DefaultQueueSize {
 		t.Fatalf("queue size = %d, want %d", o.QueueSize, DefaultQueueSize)
 	}
+	if o.AsyncBudget != DefaultAsyncBudget {
+		t.Fatalf("async budget = %d, want %d", o.AsyncBudget, DefaultAsyncBudget)
+	}
 	if o.MaxBody != DefaultMaxBody {
 		t.Fatalf("max body = %d, want %d", o.MaxBody, DefaultMaxBody)
 	}
@@ -26,6 +29,12 @@ func TestValidate(t *testing.T) {
 
 	if err := (Options{}).Validate(); err == nil {
 		t.Fatal("expected error for missing script path")
+	}
+
+	bad := Options{ScriptPath: "/app/server.js", AsyncBudget: -1}
+	bad.ApplyDefaults()
+	if err := bad.Validate(); err == nil {
+		t.Fatal("expected error for negative async_budget")
 	}
 }
 

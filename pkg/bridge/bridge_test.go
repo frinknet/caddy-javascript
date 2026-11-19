@@ -813,3 +813,78 @@ func TestAsyncNextAdvancesChain(t *testing.T) {
 		t.Fatalf("body = %q, want after", got)
 	}
 }
+
+func TestSubmitAsyncSkipsTimedOutExchange(t *testing.T) {
+	p := newTestProgram(t, time.Second)
+	sched := &fakeScheduler{}
+	p.sched = sched
+
+	ex := NewExchange(NewResponseWriter(httptest.NewRecorder()))
+	atomic.AddInt32(&ex.pending, 1)
+	ex.SetTimedOut()
+
+	var ran int32
+	p.submitAsync(ex, func() {
+		atomic.AddInt32(&ran, 1)
+	})
+
+	if n := sched.pending(); n != 0 {
+		t.Fatalf("%d callbacks queued for a timed-out exchange", n)
+	}
+	if atomic.LoadInt32(&ran) != 0 {
+		t.Fatal("callback ran for a timed-out exchange")
+	}
+	if atomic.LoadInt32(&ex.pending) != 0 {
+		t.Fatalf("pending = %d, want 0", atomic.LoadInt32(&ex.pending))
+	}
+}
+
+func TestSubmitAsyncSkipsCallbackWhenExchangeTimesOut(t *testing.T) {
+	p := newTestProgram(t, time.Second)
+	sched := &fakeScheduler{}
+	p.sched = sched
+
+	ex := NewExchange(NewResponseWriter(httptest.NewRecorder()))
+	atomic.AddInt32(&ex.pending, 1)
+
+	var ran int32
+	p.submitAsync(ex, func() {
+		atomic.AddInt32(&ran, 1)
+	})
+
+	if n := sched.pending(); n != 1 {
+		t.Fatalf("%d callbacks queued, want 1", n)
+	}
+
+	ex.SetTimedOut()
+	sched.run()
+
+	if atomic.LoadInt32(&ran) != 0 {
+		t.Fatal("callback ran after the exchange timed out")
+	}
+	if atomic.LoadInt32(&ex.pending) != 0 {
+		t.Fatalf("pending = %d, want 0", atomic.LoadInt32(&ex.pending))
+	}
+}
+
+func TestSubmitAsSkipsTimedOutExchange(t *testing.T) {
+	p := newTestProgram(t, time.Second)
+	sched := &fakeScheduler{}
+	p.sched = sched
+
+	ex := NewExchange(NewResponseWriter(httptest.NewRecorder()))
+	ex.SetTimedOut()
+
+	var ran int32
+	if ok := p.submitAs(ex, func() {
+		atomic.AddInt32(&ran, 1)
+	}); ok {
+		t.Fatal("submitAs queued a callback for a timed-out exchange")
+	}
+	if n := sched.pending(); n != 0 {
+		t.Fatalf("%d callbacks queued for a timed-out exchange", n)
+	}
+	if atomic.LoadInt32(&ran) != 0 {
+		t.Fatal("callback ran for a timed-out exchange")
+	}
+}

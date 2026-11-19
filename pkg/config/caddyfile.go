@@ -49,6 +49,15 @@ func Parse(h httpcaddyfile.Helper) (Options, error) {
 					return opts, fmt.Errorf("javascript queue_size: %w", err)
 				}
 				opts.QueueSize = n
+			case "async_budget":
+				if !h.NextArg() {
+					return opts, fmt.Errorf("javascript async_budget: missing value")
+				}
+				n, err := strconv.Atoi(h.Val())
+				if err != nil {
+					return opts, fmt.Errorf("javascript async_budget: %w", err)
+				}
+				opts.AsyncBudget = n
 			case "max_body":
 				if !h.NextArg() {
 					return opts, fmt.Errorf("javascript max_body: missing value")
@@ -71,6 +80,8 @@ func Parse(h httpcaddyfile.Helper) (Options, error) {
 				}
 			case "fallthrough":
 				opts.Fallthrough = true
+			case "eval":
+				opts.Eval = true
 			case "env_allow":
 				opts.EnvAllow = append(opts.EnvAllow, h.RemainingArgs()...)
 			case "fetch_allow":

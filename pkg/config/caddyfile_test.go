@@ -29,8 +29,10 @@ func TestParseBlockOptions(t *testing.T) {
 	opts, err := parseTest(t, `javascript /app/server.js {
 	timeout 5s
 	queue_size 10
+	async_budget 12
 	max_body 2048
 	fallthrough
+	eval
 	env_allow FOO BAR
 	fetch_allow example.com
 }`)
@@ -46,11 +48,17 @@ func TestParseBlockOptions(t *testing.T) {
 	if opts.QueueSize != 10 {
 		t.Fatalf("queue size = %d", opts.QueueSize)
 	}
+	if opts.AsyncBudget != 12 {
+		t.Fatalf("async budget = %d", opts.AsyncBudget)
+	}
 	if opts.MaxBody != 2048 {
 		t.Fatalf("max body = %d", opts.MaxBody)
 	}
 	if !opts.Fallthrough {
 		t.Fatal("fallthrough not set")
+	}
+	if !opts.Eval {
+		t.Fatal("eval not set")
 	}
 	if len(opts.EnvAllow) != 2 || opts.EnvAllow[0] != "FOO" {
 		t.Fatalf("env allow = %v", opts.EnvAllow)

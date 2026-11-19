@@ -420,7 +420,11 @@ func (p *Program) sendFile(w *ResponseWriter, req *sobek.Object, name string, op
 		return
 	}
 
-	ex := p.trackAsync()
+	ex, terr := p.trackAsync()
+	if terr != nil {
+		p.finishSendFile(w, cb, terr)
+		return
+	}
 	read := func() {
 		data, err := p.fs.ReadFile(target)
 		p.submitAsync(ex, func() {

@@ -19,11 +19,12 @@ type Scheduler interface {
 }
 
 type Config struct {
-	Timeout    time.Duration
-	EnvAllow   []string
-	FetchAllow []string
-	MaxBody    int64
-	Quit       <-chan struct{}
+	Timeout     time.Duration
+	EnvAllow    []string
+	FetchAllow  []string
+	MaxBody     int64
+	AsyncBudget int
+	Quit        <-chan struct{}
 }
 
 type Program struct {
@@ -40,34 +41,51 @@ type Program struct {
 	timers      map[int64]*jsTimer
 	nextTimerID int64
 
-	fsObj      *sobek.Object
-	pathObj    *sobek.Object
-	appObj     *sobek.Object
-	expressObj *sobek.Object
+	fsObj          *sobek.Object
+	pathObj        *sobek.Object
+	appObj         *sobek.Object
+	expressObj     *sobek.Object
+	bufferObj      *sobek.Object
+	urlObj         *sobek.Object
+	querystringObj *sobek.Object
+	utilObj        *sobek.Object
+	eventsVal      sobek.Value
 
 	modules map[string]*moduleRecord
 	routers map[*sobek.Object]*router.Table
 	statics map[*sobek.Object]*router.Static
+
+	esmMu    sync.Mutex
+	esmPaths map[sobek.ModuleRecord]string
+	esmCache map[string]sobek.ModuleRecord
 }
 
 func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger) *Program {
+	if cfg.AsyncBudget <= 0 {
+		cfg.AsyncBudget = 64
+	}
 	p := &Program{
-		rt:      sobek.New(),
-		routes:  router.New(),
-		fs:      fsys,
-		sched:   sched,
-		logger:  logger,
-		cfg:     cfg,
-		timers:  make(map[int64]*jsTimer),
-		modules: make(map[string]*moduleRecord),
-		routers: make(map[*sobek.Object]*router.Table),
-		statics: make(map[*sobek.Object]*router.Static),
+		rt:       sobek.New(),
+		routes:   router.New(),
+		fs:       fsys,
+		sched:    sched,
+		logger:   logger,
+		cfg:      cfg,
+		timers:   make(map[int64]*jsTimer),
+		modules:  make(map[string]*moduleRecord),
+		routers:  make(map[*sobek.Object]*router.Table),
+		statics:  make(map[*sobek.Object]*router.Static),
+		esmPaths: make(map[sobek.ModuleRecord]string),
+		esmCache: make(map[string]sobek.ModuleRecord),
 	}
 	p.registerEnvironment()
 	return p
 }
 
 func (p *Program) Load(src []byte) error {
+	if looksLikeESM(src) {
+		return p.LoadModule("entry.mjs", src)
+	}
 	_, err := p.rt.RunString(string(src))
 	return err
 }
@@ -232,27 +250,40 @@ func (p *Program) asyncAbandoned(ex *Exchange, err error) error {
 	return err
 }
 
-var errAsyncTimeout = errors.New("javascript: async callback timeout exceeded")
+var (
+	errAsyncTimeout        = errors.New("javascript: async callback timeout exceeded")
+	errAsyncBudgetExceeded = errors.New("javascript: async budget exceeded")
+)
 
-func (p *Program) trackAsync() *Exchange {
+func (p *Program) trackAsync() (*Exchange, error) {
 	ex := p.current
-	if ex != nil {
-		atomic.AddInt32(&ex.pending, 1)
+	if ex == nil {
+		return nil, nil
 	}
-	return ex
+	if atomic.AddInt32(&ex.pending, 1) > int32(p.cfg.AsyncBudget) {
+		atomic.AddInt32(&ex.pending, -1)
+		return nil, errAsyncBudgetExceeded
+	}
+	return ex, nil
 }
 
 func (p *Program) submitAsync(ex *Exchange, fn func()) {
+	if ex != nil && ex.TimedOut() {
+		ex.pendingDone()
+		return
+	}
 	run := func() {
 		prev := p.current
 		p.current = ex
 		defer func() {
 			p.current = prev
 			if ex != nil {
-				atomic.AddInt32(&ex.pending, -1)
-				ex.maybeFinish()
+				ex.pendingDone()
 			}
 		}()
+		if ex != nil && ex.TimedOut() {
+			return
+		}
 		if timedOut, err := p.watchAsync(fn); timedOut {
 			err = p.asyncAbandoned(ex, err)
 			if p.logger != nil {
@@ -269,8 +300,7 @@ func (p *Program) submitAsync(ex *Exchange, fn func()) {
 		return
 	}
 	if ex != nil {
-		atomic.AddInt32(&ex.pending, -1)
-		ex.maybeFinish()
+		ex.pendingDone()
 	}
 	if p.logger != nil {
 		p.logger.Warn("javascript: event queue full, dropping async callback")

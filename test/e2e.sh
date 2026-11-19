@@ -346,6 +346,7 @@ check "absolute-looking paths resolve inside the root" GET /fs/absolute --status
 check "parent segments are clamped to the root" GET /fs/clamp --status 200 --equals 'static hello'
 check "a missing fs file reports an error" GET /fs/missing --status 500 --contains 'no such file'
 check "path.join uses POSIX semantics" GET /path/join --status 200 --equals 'a/c'
+check "core shims work together" GET /shims --status 200 --ctype application/json --contains '"buffer":"hi"' --contains '"host":"example.com"' --contains '"query":"x=1&y=2"' --contains '"format":"v-2"' --contains '"events":"ok"'
 check "setTimeout completes the response" GET /timer --status 200 --equals 'timer fired'
 check "setInterval and clearInterval complete the response" GET /interval --status 200 --equals 'interval 2'
 check "a runaway async callback times out" GET /timer/spin --status 504 --equals 'Gateway Timeout'

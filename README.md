@@ -37,6 +37,7 @@ app.use((req, res) => {
 - [Request lifecycle](#request-lifecycle)
 - [Status codes and errors](#status-codes-and-errors)
 - [Security](#security)
+- [Admin eval](#admin-eval)
 - [Metrics and logging](#metrics-and-logging)
 - [Operations and deployment](#operations-and-deployment)
 - [Limitations and roadmap](#limitations-and-roadmap)
@@ -54,6 +55,9 @@ app.use((req, res) => {
   segments, wildcards, mounted routers, and static file middleware.
 - Request and response helpers: JSON and form bodies, query strings, headers,
   status codes, redirects, content types.
+- Module support: CommonJS `require` with `node_modules` resolution, ES modules
+  (`import`/`export`), and pure-Go shims for `fs`, `path`, `express`, `buffer`,
+  `events`, `url`, `querystring`, and `util`.
 - Async completion: timers, outbound `fetch`, and async `fs` callbacks keep the
   request open until the response is written.
 - Sandboxed filesystem rooted at a directory, using `os.Root` to block `..`
@@ -138,9 +142,11 @@ javascript <path_to_server_script> {
 	root        <dir>      # sandbox root for fs, defaults to the script's directory
 	timeout     <duration> # per-request execution budget, default 3s
 	queue_size  <n>        # event queue depth before 503s, default 5000
+	async_budget <n>       # max outstanding async callbacks per request, default 64
 	max_body    <bytes>    # request body cap, default 1048576
 	watch       [bool]     # reload on file change, default on
 	fallthrough            # call the next handler when no route matches
+	eval                   # expose the admin eval endpoint for this directive
 	env_allow   <names...> # process.env allowlist; "*" exposes everything
 	fetch_allow <hosts...> # fetch host allowlist
 }
@@ -156,9 +162,11 @@ takes one or more names.
 | `root` | script's directory | Sandbox root for `fs` and `path`. Also made absolute. |
 | `timeout` | `3s` | Go duration. Budget for each handler invocation and each async callback. `0` means the default. |
 | `queue_size` | `5000` | Number of queued tasks (requests plus async callbacks). |
+| `async_budget` | `64` | Maximum outstanding async callbacks per request. Callbacks over the budget are rejected. |
 | `max_body` | `1048576` | Bytes. Larger bodies get `413`. `0` means the default. |
 | `watch` | on | `watch`, `watch true`, `watch false`. Watches the script's directory. |
 | `fallthrough` | off | When nothing matches, call the next HTTP handler. |
+| `eval` | off | Expose the admin eval endpoint for this directive. See [Admin eval](#admin-eval). |
 | `env_allow` | empty | Each name is copied into `process.env`. `*` exposes the whole environment. |
 | `fetch_allow` | empty | Exact host matches, case-insensitive. `*` allows any host that resolves only to public addresses. |
 
@@ -230,8 +238,10 @@ The Caddyfile adapts to a regular Caddy route handler. `caddy adapt
                   "root": "/srv/app",
                   "timeout": "2s",
                   "queue_size": 2000,
+                  "async_budget": 32,
                   "max_body": 2097152,
                   "watch": false,
+                  "eval": true,
                   "env_allow": ["API_KEY"],
                   "fetch_allow": ["api.example.com"]
                 }
@@ -555,6 +565,11 @@ shims always win:
 - `fs` and `node:fs`
 - `path` and `node:path`
 - `express`
+- `buffer` and `node:buffer`
+- `events` and `node:events`
+- `url` and `node:url`
+- `querystring` and `node:querystring`
+- `util` and `node:util`
 
 Anything else is treated as a path. Local specifiers (`./`, `../`, and `/`) are
 resolved from the directory of the file doing the requiring. A bare name like
@@ -569,7 +584,29 @@ does not reload by itself, only the entry script is watched.
 
 Everything stays inside `root`. A module cannot reach above it, and there is no
 package manager or npm install. The `express` shim provides the app factory
-plus `Router()` and `static()`.
+plus `Router()` and `static()`. The `buffer` shim also installs a global
+`Buffer`.
+
+### ES modules
+
+An entry script or module that uses top-level `import`/`export` is evaluated as
+an ES module. Relative specifiers resolve against the importing file and bare
+specifiers walk `node_modules` exactly like `require`. CommonJS modules and the
+built-in shims are adapted automatically, so `import path from "path"`,
+`import { Buffer } from "buffer"`, and `import { Router } from "express"` all
+work. JSON imports yield the parsed value. Top-level `await` is not supported:
+the module must evaluate synchronously.
+
+```js
+// server.mjs
+import { Router } from "express";
+import { Buffer } from "buffer";
+
+const router = Router();
+router.get("/bin", (req, res) => {
+	res.send(Buffer.from("ok").toString());
+});
+```
 
 ```js
 // lib/greet.js
@@ -616,7 +653,8 @@ expires the VM is interrupted, the interrupt flag is cleared, and the runtime
 stays usable for later requests. If nothing was written the client gets `504`;
 otherwise the partial response stands. A timed-out callback abandons its
 exchange: the request finishes immediately, the timers it owns are cancelled,
-and the event loop moves on, so one runaway callback cannot wedge the server.
+and callbacks already queued for that exchange are skipped when they run, so
+one runaway callback cannot wedge the server or waste event-loop slots.
 
 ### Backpressure
 
@@ -704,10 +742,30 @@ not about running untrusted code.
 - **Code execution.** There is no `eval` allowlist control: the whole point is
   to run the script. A bug or infinite loop in a handler is contained by the
   timeout and by process isolation only.
+- **Admin eval.** The admin eval endpoint is off by default. Enabling `eval`
+  lets anyone with admin API access run arbitrary code in the directive's
+  runtime. Expose the admin API only on a trusted listener.
 
 Deploy Caddy itself with the usual precautions: non-root user, read-only
 filesystem where possible, and no admin API exposure. The bundled image runs as
 root by default, like the upstream Caddy image.
+
+## Admin eval
+
+Enabling `eval` in a directive registers its script path as a target on the
+Caddy admin API. The endpoint runs code on the directive's event loop:
+
+```sh
+curl -s localhost:2019/javascript/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"/srv/app/server.js","code":"1+1"}'
+# {"result":"2"}
+```
+
+The target is the absolute script path. The endpoint is off unless the
+directive opts in. It runs with the same globals and sandbox as the script and
+is bounded by the request context. It is a diagnostic tool; treat it as remote
+code execution.
 
 ## Metrics and logging
 

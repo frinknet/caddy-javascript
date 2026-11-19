@@ -92,6 +92,9 @@ func (p *Program) clearTimer(id int64) {
 // submitAsync it does not touch the pending count; timers manage that
 // themselves for their whole lifetime.
 func (p *Program) submitAs(ex *Exchange, fn func()) bool {
+	if ex != nil && ex.TimedOut() {
+		return false
+	}
 	run := func() {
 		prev := p.current
 		p.current = ex
@@ -151,7 +154,11 @@ func (p *Program) startTimer(call sobek.FunctionCall, repeat bool) sobek.Value {
 	}
 	delay := time.Duration(ms) * time.Millisecond
 
-	t := p.newTimer(p.trackAsync())
+	ex, terr := p.trackAsync()
+	if terr != nil {
+		return p.rt.ToValue(int64(-1))
+	}
+	t := p.newTimer(ex)
 	if repeat && delay < time.Millisecond {
 		delay = time.Millisecond
 	}
@@ -172,6 +179,9 @@ func (p *Program) runTimeout(t *jsTimer, fn sobek.Callable, delay time.Duration)
 	case <-timer.C:
 		if p.submitAs(t.ex, func() {
 			defer t.release()
+			if t.ex != nil && t.ex.TimedOut() {
+				return
+			}
 			if t.stopped() {
 				return
 			}
@@ -194,12 +204,23 @@ func (p *Program) runInterval(t *jsTimer, fn sobek.Callable, delay time.Duration
 	for {
 		select {
 		case <-ticker.C:
-			p.submitAs(t.ex, func() {
+			if t.ex != nil && t.ex.TimedOut() {
+				t.release()
+				return
+			}
+			if !p.submitAs(t.ex, func() {
+				if t.ex != nil && t.ex.TimedOut() {
+					t.cancel()
+					return
+				}
 				if t.stopped() {
 					return
 				}
 				_, _ = fn(sobek.Undefined())
-			})
+			}) {
+				t.release()
+				return
+			}
 		case <-t.stop:
 			t.release()
 			return
