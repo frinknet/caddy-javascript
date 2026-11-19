@@ -72,6 +72,8 @@ var (
 	ErrJobFailed = errors.New("javascript: job failed")
 	// ErrJobQueueFull reports a job that could not be queued again.
 	ErrJobQueueFull = errors.New("javascript: job queue full")
+	// ErrJobStale reports a job bound to a superseded runtime generation.
+	ErrJobStale = errors.New("javascript: job belongs to a previous runtime generation")
 	// ErrJobInvalidTransition reports an operation on a job in the wrong state.
 	ErrJobInvalidTransition = errors.New("javascript: invalid job state transition")
 )
@@ -274,6 +276,23 @@ func (j *Job) Abandon(cause error) {
 	}
 	j.state = StateFailed
 	j.err = cause
+}
+
+// Fence stops a non-terminal job that belongs to a superseded runtime
+// generation. It cancels the job's context like Cancel but records the stale
+// generation as the cause, so the job can never reach a newer Program. It
+// reports whether the job was still active.
+func (j *Job) Fence() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.state.terminal() {
+		return false
+	}
+	j.initContextLocked()
+	j.cancel()
+	j.state = StateCancelled
+	j.err = ErrJobStale
+	return true
 }
 
 // Cancel stops a non-terminal job and cancels its context. It reports whether

@@ -800,6 +800,8 @@ script is written, created, or renamed, debounced by 200ms.
 
 - A reload builds a new VM and route table. In-flight exchanges keep using the
   program they started with.
+- The background runtime reloads from the same source and fences jobs admitted
+  before the swap; see below.
 - A reload that fails to parse or throws logs
   `javascript: reload failed, keeping previous script` and leaves the old
   program serving.
@@ -812,15 +814,24 @@ script is written, created, or renamed, debounced by 200ms.
 
 Provisioning also loads the script into a resident background runtime: a second
 VM with its own event loop, kept separate from request handling and from the
-request program's state. It loads once, registers its handlers, and then idles
-until shutdown; no JavaScript API reaches it yet, and it is not reloaded with
-the request runtime. Top-level script code therefore runs once per runtime at
-startup, so top-level side effects such as file writes happen twice.
+request program's state. It loads at provisioning, registers its handlers, and
+then idles until shutdown; no JavaScript API reaches it yet. With `watch` on, it
+reloads with the request runtime. Top-level script code therefore runs once per
+runtime at startup and again on each reload, so top-level side effects such as
+file writes happen twice each time.
 
 The background runtime owns a bounded FIFO for jobs, sized by `queue_size`. A
 single supervisor goroutine hands one job at a time to its event loop, so jobs
 never run concurrently with one another. Admission never blocks: a full queue
 rejects the job and increments `caddy_javascript_queue_full_total`.
+
+Each successful reload builds a new Program and increments the runtime
+generation. A job admitted under an older generation is fenced: it is cancelled
+with a stale-generation error and never dispatched, so a callback created before
+a reload cannot reach the new Program. A reload that fails to load leaves the
+previous Program and generation in place, so queued jobs stay valid. On
+shutdown the queue closes and the worker drains the jobs already admitted before
+the event loop stops.
 
 Each job carries a stable random id, a worker name, a serialized payload, a
 generation, an optional absolute deadline, an async budget, and a retry policy

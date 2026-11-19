@@ -3,8 +3,10 @@
 package jobs
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,6 +16,10 @@ import (
 	"github.com/frinknet/caddy-javascript/pkg/metric"
 	"github.com/frinknet/caddy-javascript/pkg/sched"
 )
+
+// ErrRuntimeStopped reports an operation on a background runtime that has
+// already been stopped.
+var ErrRuntimeStopped = errors.New("javascript: background runtime stopped")
 
 // Hooks observes resident runtime lifecycle events. Tests use them to prove
 // that the program loads and unloads; production leaves them nil.
@@ -37,6 +43,11 @@ type Runtime struct {
 	exec   Executor
 	logger *zap.Logger
 	hooks  Hooks
+	cfg    bridge.Config
+	fsys   *files.FS
+
+	gen     atomic.Uint64
+	stopped chan struct{}
 
 	workerDone chan struct{}
 	stopOnce   sync.Once
@@ -56,6 +67,7 @@ func Start(src []byte, cfg bridge.Config, fsys *files.FS, logger *zap.Logger, qu
 		exec:       exec,
 		logger:     logger,
 		hooks:      hooks,
+		stopped:    make(chan struct{}),
 		workerDone: make(chan struct{}),
 	}
 	r.loop.OnPanic = func(recovered any) {
@@ -64,11 +76,14 @@ func Start(src []byte, cfg bridge.Config, fsys *files.FS, logger *zap.Logger, qu
 		}
 	}
 	cfg.Quit = r.loop.Quit()
+	r.cfg = cfg
+	r.fsys = fsys
+	r.gen.Store(1)
 
 	loaded := make(chan error, 1)
 	go r.loop.Run(nil)
 	if !r.loop.Submit(func() {
-		prog := bridge.NewProgram(cfg, fsys, r.loop, r.logger)
+		prog := bridge.NewProgram(r.cfg, r.fsys, r.loop, r.logger)
 		if err := prog.Load(src); err != nil {
 			loaded <- err
 			return
@@ -93,9 +108,53 @@ func Start(src []byte, cfg bridge.Config, fsys *files.FS, logger *zap.Logger, qu
 }
 
 // Enqueue admits a job for the resident runtime. It never blocks and reports
-// false when the bounded queue is full or shutting down.
+// false when the bounded queue is full or shutting down. A job without a
+// generation is bound to the current one, so a reload fences it.
 func (r *Runtime) Enqueue(job *Job) bool {
+	if job == nil {
+		return false
+	}
+	if job.Generation == 0 {
+		job.Generation = r.gen.Load()
+	}
 	return r.queue.Admit(job)
+}
+
+// Reload loads src into a new Program on the resident event loop and swaps it
+// in. Every job admitted under an earlier generation is fenced: it is cancelled
+// without running, so an old callback can never reach the new Program. A script
+// that fails to load leaves the previous Program and generation in place.
+func (r *Runtime) Reload(src []byte) error {
+	select {
+	case <-r.stopped:
+		return ErrRuntimeStopped
+	default:
+	}
+
+	loaded := make(chan error, 1)
+	if !r.loop.Submit(func() {
+		select {
+		case <-r.stopped:
+			loaded <- ErrRuntimeStopped
+			return
+		default:
+		}
+
+		prog := bridge.NewProgram(r.cfg, r.fsys, r.loop, r.logger)
+		if err := prog.Load(src); err != nil {
+			loaded <- err
+			return
+		}
+		r.prog = prog
+		r.gen.Add(1)
+		if r.hooks.Loaded != nil {
+			r.hooks.Loaded(prog)
+		}
+		loaded <- nil
+	}) {
+		return ErrJobQueueFull
+	}
+	return <-loaded
 }
 
 // work is the supervisor goroutine: it pulls one job at a time, runs its
@@ -113,6 +172,13 @@ func (r *Runtime) work() {
 
 func (r *Runtime) run(job *Job) {
 	if job == nil {
+		return
+	}
+
+	if job.Generation != 0 && job.Generation != r.gen.Load() {
+		if job.Fence() {
+			r.logSkipped(job, ErrJobStale)
+		}
 		return
 	}
 
@@ -207,6 +273,7 @@ func (r *Runtime) logSkipped(job *Job, err error) {
 // that is already queued.
 func (r *Runtime) Stop() {
 	r.stopOnce.Do(func() {
+		close(r.stopped)
 		r.queue.Close()
 		<-r.workerDone
 		r.loop.Stop()

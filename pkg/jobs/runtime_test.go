@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -404,5 +405,168 @@ func TestRuntimeDrainsQueuedJobsOnStop(t *testing.T) {
 
 	if got := calls.Load(); got != 4 {
 		t.Fatalf("ran %d queued jobs, want 4", got)
+	}
+}
+
+func TestRuntimeReloadSwapsProgram(t *testing.T) {
+	loaded := make(chan *bridge.Program, 4)
+	ranOn := make(chan *bridge.Program, 4)
+	exec := func(prog *bridge.Program, _ *Job) error {
+		ranOn <- prog
+		return nil
+	}
+
+	rt, err := Start([]byte(`app.get('/old', function (req, res) { res.send('old') })`),
+		bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{
+			Loaded: func(p *bridge.Program) { loaded <- p },
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	old := <-loaded
+	if err := rt.Reload([]byte(`app.get('/new', function (req, res) { res.send('new') })`)); err != nil {
+		t.Fatal(err)
+	}
+	var current *bridge.Program
+	select {
+	case current = <-loaded:
+	case <-time.After(time.Second):
+		t.Fatal("reload never loaded a program")
+	}
+	if current == old {
+		t.Fatal("reload kept the previous program")
+	}
+
+	job := NewJob("after-reload", nil)
+	if !rt.Enqueue(job) {
+		t.Fatal("job was rejected")
+	}
+	waitState(t, job, StateSucceeded)
+	if got := <-ranOn; got != current {
+		t.Fatal("job ran on a program other than the reloaded one")
+	}
+	if got := job.Generation; got != 2 {
+		t.Fatalf("job generation = %d, want 2", got)
+	}
+}
+
+func TestRuntimeReloadFencesStaleJobs(t *testing.T) {
+	var calls atomic.Int32
+	exec := func(_ *bridge.Program, _ *Job) error {
+		calls.Add(1)
+		return nil
+	}
+
+	rt, err := Start([]byte(``), bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	if err := rt.Reload([]byte(``)); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := NewJob("stale", nil)
+	stale.Generation = 1
+	if !rt.Enqueue(stale) {
+		t.Fatal("stale job was rejected")
+	}
+	waitState(t, stale, StateCancelled)
+	if !errors.Is(stale.Err(), ErrJobStale) {
+		t.Fatalf("stale job err = %v, want the stale-generation error", stale.Err())
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("executor ran %d stale jobs, want 0", got)
+	}
+
+	fresh := NewJob("fresh", nil)
+	if !rt.Enqueue(fresh) {
+		t.Fatal("fresh job was rejected")
+	}
+	waitState(t, fresh, StateSucceeded)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("executor ran %d jobs, want 1", got)
+	}
+	if got := fresh.Generation; got != 2 {
+		t.Fatalf("fresh job generation = %d, want 2", got)
+	}
+}
+
+func TestRuntimeReloadKeepsProgramOnFailure(t *testing.T) {
+	loaded := make(chan *bridge.Program, 4)
+	ranOn := make(chan *bridge.Program, 4)
+	exec := func(prog *bridge.Program, _ *Job) error {
+		ranOn <- prog
+		return nil
+	}
+
+	rt, err := Start([]byte(``), bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{
+		Loaded: func(p *bridge.Program) { loaded <- p },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	old := <-loaded
+	if err := rt.Reload([]byte(`throw new Error('boom')`)); err == nil {
+		t.Fatal("expected the reload to fail")
+	}
+	select {
+	case <-loaded:
+		t.Fatal("a failed reload loaded a program")
+	default:
+	}
+
+	job := NewJob("after-failure", nil)
+	if !rt.Enqueue(job) {
+		t.Fatal("job was rejected")
+	}
+	waitState(t, job, StateSucceeded)
+	if got := <-ranOn; got != old {
+		t.Fatal("job ran on a program other than the previous one")
+	}
+	if got := job.Generation; got != 1 {
+		t.Fatalf("job generation = %d, want 1", got)
+	}
+}
+
+func TestRuntimeReloadAndEnqueueRace(t *testing.T) {
+	src := []byte(`app.get('/x', function (req, res) { res.send('x') })`)
+	exec := func(_ *bridge.Program, _ *Job) error { return nil }
+
+	rt, err := Start(src, bridge.Config{}, newTestFS(t), nil, 8, exec, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Stop()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rt.Enqueue(NewJob("job", nil))
+		}()
+		go func() {
+			defer wg.Done()
+			_ = rt.Reload(src)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestRuntimeReloadAfterStop(t *testing.T) {
+	rt, err := Start([]byte(``), bridge.Config{}, newTestFS(t), nil, 8, nil, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Stop()
+
+	if err := rt.Reload([]byte(``)); !errors.Is(err, ErrRuntimeStopped) {
+		t.Fatalf("reload after stop = %v, want the stopped error", err)
 	}
 }

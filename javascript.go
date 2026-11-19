@@ -144,6 +144,13 @@ func (h *Handler) reload() {
 	}
 
 	h.prog = prog
+
+	if h.background != nil {
+		if err := h.background.Reload(src); err != nil {
+			h.logger.Error("javascript: background reload failed, keeping previous script", zap.Error(err))
+		}
+	}
+
 	h.logger.Info("javascript: reloaded script", zap.String("path", h.scriptPath))
 	metric.Reloads.Inc()
 }
