@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,9 +40,19 @@ type Config struct {
 	Logger           *zap.Logger
 }
 
+// Request is one dispatch into the VM. Req carries the live request: scripts
+// see its method, URL, headers, cookies, and body, and rewrite() mutates it for
+// downstream Caddy handlers. Vars is the request's variable table; nil means a
+// private table only the script can see. Lookup, when set, resolves names the
+// table does not hold, such as placeholders produced by Caddy's map directive.
 type Request struct {
-	Method string
-	Path   string
+	Req     *http.Request
+	Vars    map[string]any
+	Lookup  func(name string) (any, bool)
+	Set     func(name string, value any)
+	Delete  func(name string)
+	Params  map[string]string
+	MaxBody int64
 }
 
 type Response struct {
@@ -58,7 +69,12 @@ type VM struct {
 
 	mu             sync.RWMutex
 	entries        map[string]quickjs.Value
+	layers         map[string][]layer
 	requireHandler bool
+
+	currentScript string
+	varsFactory   quickjs.Value
+	active        *requestState
 
 	slots  chan struct{}
 	closed chan struct{}
@@ -147,31 +163,13 @@ func New(cfg Config) (*VM, error) {
 	provisionCtx, cancelProvision := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancelProvision()
 
-	ns, err := rt.EvalModuleContext(provisionCtx, entryName, string(src))
-	if err != nil {
-		rt.Close()
-		root.Close()
-		return nil, fmt.Errorf("javascript: evaluate %s: %w", entryName, err)
-	}
-
-	entry, err := ns.Get("default")
-	if err != nil {
-		rt.Close()
-		root.Close()
-		return nil, fmt.Errorf("javascript: read default export: %w", err)
-	}
-	if cfg.RequireHandler && !entry.IsFunction() {
-		rt.Close()
-		root.Close()
-		return nil, fmt.Errorf("javascript: %s must export a default function", entryName)
-	}
-
 	v := &VM{
 		rt:             rt,
 		loop:           loop,
 		root:           root,
 		sandbox:        sb,
-		entries:        map[string]quickjs.Value{script: entry},
+		entries:        map[string]quickjs.Value{},
+		layers:         map[string][]layer{},
 		requireHandler: cfg.RequireHandler,
 		slots:          make(chan struct{}, cfg.QueueSize),
 		closed:         make(chan struct{}),
@@ -179,9 +177,62 @@ func New(cfg Config) (*VM, error) {
 		logger:         cfg.Logger,
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
+
+	factory, err := rt.Eval(varsFactorySource)
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install runtime bridge: %w", err)
+	}
+	v.varsFactory = factory
+	proto, err := rt.Eval("Object.getPrototypeOf(globalThis)")
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: read global prototype: %w", err)
+	}
+	installGlobals, err := rt.Eval(globalsFactorySource)
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install globals bridge: %w", err)
+	}
+	if _, err := installGlobals.Call(proto, v.globalsLive, v.globalsKnown, v.globalsLookup, v.globalsSet); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install globals bridge: %w", err)
+	}
+	if err := rt.Set("route", v.route); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install route(): %w", err)
+	}
+
+	v.currentScript = script
+	ns, err := rt.EvalModuleContext(provisionCtx, entryName, string(src))
+	v.currentScript = ""
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: evaluate %s: %w", entryName, err)
+	}
+
+	entry, err := ns.Get("default")
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: read default export: %w", err)
+	}
+	if cfg.RequireHandler && !entry.IsFunction() {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: %s must export a default function", entryName)
+	}
+	v.entries[script] = entry
+
 	loop.Begin()
 	go v.run()
 	return v, nil
+}
+
+// cleanupNew releases a VM whose entry module never finished provisioning. The
+// loop has not started yet, so the runtime is closed directly.
+func (v *VM) cleanupNew() {
+	v.cancel()
+	v.rt.Close()
+	_ = v.root.Close()
 }
 
 func (v *VM) run() {
@@ -203,6 +254,7 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 
 	v.mu.RLock()
 	entry, ok := v.entries[scriptPath]
+	layers := append([]layer(nil), v.layers[scriptPath]...)
 	v.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("javascript: module %q is not loaded", scriptPath)
@@ -220,30 +272,98 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 		err  error
 	}
 	ch := make(chan result, 1)
+	resp := &response{}
+	st, err := newRequestState(req, resp)
+	if err != nil {
+		return nil, err
+	}
 
 	v.loop.Post(func() {
-		resp := &response{}
-		http := map[string]any{
-			"method":  req.Method,
-			"path":    req.Path,
-			"respond": resp.respond,
+		v.active = st
+		defer func() { v.active = nil }()
+
+		httpObj, err := v.newHTTP(ctx, st, resp)
+		if err == nil {
+			var stopped bool
+			stopped, err = v.runChain(ctx, st, httpObj, layers, 0)
+			if err == nil && !stopped && !resp.responded() {
+				_, err = entry.CallContext(ctx, httpObj)
+			}
 		}
-		_, err := entry.CallContext(ctx, http)
-		ch <- result{resp: resp.finish(), err: err}
+		st.finish()
+		ch <- result{resp: resp.finish(), err: portableError(err)}
 	})
 
 	select {
 	case r := <-ch:
 		return r.resp, r.err
 	case <-ctx.Done():
+		st.finish()
 		return nil, ctx.Err()
 	case <-v.closed:
+		st.finish()
 		return nil, ErrClosed
 	case <-v.done:
+		st.finish()
 		if err := v.runError(); err != nil {
 			return nil, err
 		}
 		return nil, ErrClosed
+	}
+}
+
+// globalsLive reports whether a request dispatch is on the VM goroutine. Only
+// then does the global space resolve to the request's Caddy vars.
+func (v *VM) globalsLive() bool {
+	return v.active != nil
+}
+
+// globalsKnown reports whether a bare identifier resolves to a Caddy
+// placeholder. It is called on the VM goroutine while a dispatch is active.
+func (v *VM) globalsKnown(name string) (bool, error) {
+	if v.active == nil {
+		return false, nil
+	}
+	_, ok := v.active.placeholder(name)
+	return ok, nil
+}
+
+// globalsLookup returns the value behind a bare identifier. The JS side calls
+// it only after globalsKnown says the name is known.
+func (v *VM) globalsLookup(name string) (any, error) {
+	if v.active == nil {
+		return nil, nil
+	}
+	value, _ := v.active.placeholder(name)
+	return value, nil
+}
+
+// globalsSet writes a bare identifier assignment back to the request. A name
+// that came from the replacer is overridden there too, so a downstream Caddy
+// placeholder such as {site} sees the new value.
+func (v *VM) globalsSet(name string, value any) error {
+	if v.active == nil {
+		return errors.New("javascript: no request is active")
+	}
+	return v.active.globalSet(name, value)
+}
+
+// portableError detaches an error from the runtime. The caller formats it after
+// the VM goroutine has moved on, and a *quickjs.Error reads its live value when
+// formatted.
+func portableError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, ErrClosed):
+		return ErrClosed
+	default:
+		return errors.New(err.Error())
 	}
 }
 
@@ -275,7 +395,9 @@ func (v *VM) Load(ctx context.Context, scriptPath string) error {
 
 	ch := make(chan error, 1)
 	v.loop.Post(func() {
+		v.currentScript = script
 		ns, err := v.rt.EvalModuleContext(ctx, name, string(src))
+		v.currentScript = ""
 		if err != nil {
 			ch <- fmt.Errorf("javascript: evaluate %s: %w", name, err)
 			return
@@ -372,7 +494,7 @@ func (r *response) respond(status int, headers map[string]any, body any) error {
 		if val == nil {
 			continue
 		}
-		r.headers[k] = fmt.Sprint(val)
+		r.headers[k] = headerValue(val)
 	}
 	switch b := body.(type) {
 	case nil:
@@ -399,6 +521,12 @@ func (r *response) finish() *Response {
 		Headers: r.headers,
 		Body:    r.body,
 	}
+}
+
+func (r *response) responded() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.called
 }
 
 type sandbox struct {
@@ -455,4 +583,22 @@ func (s *sandbox) read(name string) ([]byte, error) {
 	}
 	defer f.Close()
 	return io.ReadAll(f)
+}
+
+// headerValue renders a JavaScript header value. An array, which a script gets
+// from headers.get() when a request carries repeated headers, joins the way
+// HTTP repeats a field.
+func headerValue(value any) string {
+	switch v := value.(type) {
+	case []string:
+		return strings.Join(v, ", ")
+	case []any:
+		parts := make([]string, len(v))
+		for i, item := range v {
+			parts[i] = fmt.Sprint(item)
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return fmt.Sprint(value)
+	}
 }

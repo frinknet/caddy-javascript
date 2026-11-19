@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -165,7 +166,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 
-	resp, err := h.vm.Handle(ctx, h.script, vm.Request{Method: r.Method, Path: r.URL.Path})
+	vars, _ := r.Context().Value(caddyhttp.VarsCtxKey).(map[string]any)
+	var lookup func(string) (any, bool)
+	var setVar func(string, any)
+	var deleteVar func(string)
+	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok && repl != nil {
+		lookup = placeholderLookup(repl)
+		setVar = repl.Set
+		deleteVar = repl.Delete
+	}
+	resp, err := h.vm.Handle(ctx, h.script, vm.Request{
+		Req:    r,
+		Vars:   vars,
+		Lookup: lookup,
+		Set:    setVar,
+		Delete: deleteVar,
+		Params: map[string]string{},
+	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
 			return r.Context().Err()
@@ -206,6 +223,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	w.WriteHeader(status)
 	_, _ = w.Write(resp.Body)
 	return nil
+}
+
+// shortPlaceholders expands the Caddyfile shorthands, so a script can read
+// http.vars.host the same way a Caddyfile writes {host}.
+var shortPlaceholders = httpcaddyfile.NewShorthandReplacer()
+
+// placeholderLookup resolves a name a script reads from http.vars but the vars
+// table does not hold. The replacer answers map destinations and other lazy
+// placeholders; its Caddyfile shorthands are expanded on demand.
+func placeholderLookup(repl *caddy.Replacer) func(string) (any, bool) {
+	return func(name string) (any, bool) {
+		if value, ok := repl.Get(name); ok {
+			return value, true
+		}
+		if name == "" || strings.ContainsAny(name, "{} \t\r\n") {
+			return nil, false
+		}
+		segment := caddyfile.Segment{{Text: "{" + name + "}"}}
+		shortPlaceholders.ApplyToSegment(&segment)
+		expanded := segment[0].Text
+		if expanded == "{"+name+"}" {
+			return nil, false
+		}
+		return repl.Get(strings.TrimSuffix(strings.TrimPrefix(expanded, "{"), "}"))
+	}
 }
 
 func resolve(o config.Options) (string, string, error) {

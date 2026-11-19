@@ -3,9 +3,10 @@
 Status: target design. Implemented today: one go-quickjs VM per site per
 configuration generation, joined by the site entry and its handle directives;
 ESM evaluation with a sandboxed loader and a provision deadline; a generation
-registry keyed by host matcher set or explicit `site`; and a minimal `http`
-object. The rest of this file is the target. `README.md` documents what runs
-today.
+registry keyed by host matcher set or explicit `site`; a per-request `http`
+object with request facts, headers, a bounded body, cookies, a live vars proxy,
+`rewrite`, `respond`, and `next`; and `route()` JavaScript layers. The rest of
+this file is the target. `README.md` documents what runs today.
 
 ## 1. Vision
 
@@ -222,9 +223,21 @@ helper.
 
 ### 4.5 Vars
 
+During a dispatch, the global space is the request's Caddy placeholder space. A
+bare identifier resolves a `map` destination or any other placeholder, so
+`site` and `host` work without a prefix; unknown names read as `undefined`. It
+never reads a variable. Assigning a bare name, including a new one, overrides
+the matching replacer placeholder, so downstream `{name}` observes it, but it
+does not create a variable and `{http.vars.name}` does not. Values must be plain
+data; a function is rejected. A lexical declaration shadows the name, and
+outside a dispatch the names are not defined.
+
 `http.vars` is a `Proxy` over `caddyhttp.GetVar` and `caddyhttp.SetVar`, the
-request's `VarsCtxKey` table. Assignments are visible to downstream handlers and
-to `{http.vars.*}` in templates. The view is per request.
+request's `VarsCtxKey` table. It is the only path to a variable: assignments are
+visible to downstream handlers and to `{http.vars.*}` in templates, and a bare
+identifier never reads one. The view is per request. The table is flat: a map
+value is one key, so `{http.vars.user.name}` is not a child placeholder;
+templates read `{http.vars.user}` and format the map.
 
 Worker and global values do not become request vars by themselves. If a worker
 value must reach templates, the site handler copies it into each request's var
@@ -401,8 +414,10 @@ Substring checks are not a substitute for exact bytes.
 
 ## 10. Current state
 
-The configuration surface, a per-directive go-quickjs VM, ESM evaluation with a
-sandboxed loader, a minimal per-request `http` (`method`, `path`, `respond`),
-timeouts, memory limits, queue admission, and VM cleanup on reload are
-implemented. Site VM sharing, workers and messages, `server`, `_`, vars,
-events, fetch, `fs`, and watching remain.
+The configuration surface, one go-quickjs VM per site per generation, ESM
+evaluation with a sandboxed loader, a per-request `http` (request facts,
+`headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
+`respond`, and `next`), `route()` layers, timeouts, memory limits, queue
+admission, and VM cleanup on reload are implemented. Workers and messages, the
+mutable `server` draft, `_`, events, fetch, `fs`, `env_allow`, and watching
+remain.

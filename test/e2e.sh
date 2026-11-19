@@ -57,6 +57,34 @@ http://shared.example:80 {
 	handle /api/* {
 		javascript /app/shared-api.js
 	}
+	handle /surface/* {
+		javascript /app/surface.js
+	}
+	handle /files/* {
+		javascript /app/surface-rewrite.js {
+			fallthrough
+		}
+		file_server {
+			root /app
+		}
+	}
+}
+
+http://vars.example:80 {
+	map {host} {site} {
+		~^(.+?)\.\d{1,3}(?:[.-]\d{1,3}){3}\.(?:nip|sslip)\.io(?::\d+)?$ ${1}
+		default {host}
+	}
+	vars from_caddy mapped
+	handle {
+		javascript /app/vars.js {
+			fallthrough
+		}
+		templates
+		file_server {
+			root /app
+		}
+	}
 }
 CADDY
 
@@ -108,7 +136,8 @@ if [ "$ready" -ne 1 ]; then
 	exit 1
 fi
 
-# check NAME METHOD PATH [--status N] [--equals BODY] [--contains TEXT] [--host NAME]
+# check NAME METHOD PATH [--status N] [--equals BODY] [--contains TEXT]
+#                      [--host NAME] [--cookie VALUE] [--rheader NAME:VALUE]
 check() {
 	check_name=$1
 	check_method=$2
@@ -120,6 +149,8 @@ check() {
 	check_have_equals=0
 	check_contains=
 	check_host=
+	check_cookie=
+	check_rheader=
 
 	while [ "$#" -gt 0 ]; do
 		case $1 in
@@ -140,6 +171,14 @@ check() {
 			check_host=$2
 			shift 2
 			;;
+		--cookie)
+			check_cookie=$2
+			shift 2
+			;;
+		--rheader)
+			check_rheader=$2
+			shift 2
+			;;
 		*)
 			echo "check: unknown option $1" >&2
 			exit 2
@@ -149,15 +188,15 @@ check() {
 
 	if [ "$check_method" = HEAD ]; then
 		if [ -n "$check_host" ]; then
-			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -I "$BASE$check_path" 2>"$REQ/curl-err")
+			check_got=$(curl -sS -o "$REQ/body" -D "$REQ/headers" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -b "$check_cookie" -I "$BASE$check_path" 2>"$REQ/curl-err")
 		else
-			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -I "$BASE$check_path" 2>"$REQ/curl-err")
+			check_got=$(curl -sS -o "$REQ/body" -D "$REQ/headers" -w '%{http_code}' --max-time 10 -b "$check_cookie" -I "$BASE$check_path" 2>"$REQ/curl-err")
 		fi
 	else
 		if [ -n "$check_host" ]; then
-			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
+			check_got=$(curl -sS -o "$REQ/body" -D "$REQ/headers" -w '%{http_code}' --max-time 10 -H "Host: $check_host" -b "$check_cookie" -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
 		else
-			check_got=$(curl -sS -o "$REQ/body" -w '%{http_code}' --max-time 10 -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
+			check_got=$(curl -sS -o "$REQ/body" -D "$REQ/headers" -w '%{http_code}' --max-time 10 -b "$check_cookie" -X "$check_method" "$BASE$check_path" 2>"$REQ/curl-err")
 		fi
 	fi
 	check_bad=0
@@ -173,6 +212,15 @@ check() {
 	if [ -n "$check_contains" ] && ! grep -qF -- "$check_contains" "$REQ/body"; then
 		echo "    body $(cat "$REQ/body"), want to contain $check_contains"
 		check_bad=1
+	fi
+	if [ -n "$check_rheader" ]; then
+		check_rname=${check_rheader%%:*}
+		check_rvalue=${check_rheader#*:}
+		check_rvalue=${check_rvalue# }
+		if ! grep -qi "^$check_rname: *$check_rvalue" "$REQ/headers"; then
+			echo "    response headers do not have $check_rname: $check_rvalue"
+			check_bad=1
+		fi
 	fi
 	if [ -s "$REQ/curl-err" ]; then
 		echo "    curl: $(cat "$REQ/curl-err")"
@@ -196,6 +244,12 @@ check "global and site entries provision together" GET /again --status 200 --equ
 
 check "site handlers share one VM" GET /site/one --host shared.example --status 200 --equals 'site=1 lib=1'
 check "handle directives share the site realm and module cache" GET /api/two --host shared.example --status 200 --equals 'api=1 lib=2'
+
+check "route layers set request headers" GET "/surface/layer/hello?q=z" --host shared.example --cookie "c=1" --status 200 --equals 'GET|/surface/layer/hello|one|z|1' --rheader "x-layer: one"
+check "http exposes query and cookies, and skips unmatched layers" GET /surface/plain --host shared.example --status 200 --equals 'GET|/surface/plain|none|-|-'
+check "rewrite changes the path a later Caddy handler sees" GET /files/anything --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
+
+check "bare globals and http.vars stay separate" GET /vars/page.html --host vars.example --status 200 --equals 'site=vars.example! host=vars.example caddy=mapped bare_site=vars.example! bare_fresh=new vars_explicit=new vars_fresh=[]'
 
 echo ""
 echo "=== Test 2: configuration validation ==="

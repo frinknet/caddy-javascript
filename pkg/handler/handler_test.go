@@ -365,3 +365,172 @@ func TestNestedHandlerJoinsEnclosingSite(t *testing.T) {
 		t.Fatal("nested handler did not join the enclosing site VM")
 	}
 }
+
+func TestServeHTTPSharesVarsAndRewriteWithNextHandler(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", `route("/down/*", (http, next) => {
+	http.vars.layer = "ran"
+	next()
+})
+export default function handler(http) {
+	http.vars.seen = "yes"
+	http.rewrite({ method: "PUT", path: "/down/changed", headers: { "x-rewritten": "1" } })
+}
+`)
+	h := &Handler{Options: config.Options{ScriptPath: path, Fallthrough: true}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	vars := make(map[string]any)
+	req := httptest.NewRequest(http.MethodGet, "/down/original", nil)
+	req = req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars))
+
+	rec := httptest.NewRecorder()
+	called := false
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		called = true
+		if r.Method != http.MethodPut {
+			t.Errorf("method = %q, want PUT", r.Method)
+		}
+		if r.URL.Path != "/down/changed" {
+			t.Errorf("path = %q, want /down/changed", r.URL.Path)
+		}
+		if got := r.Header.Get("x-rewritten"); got != "1" {
+			t.Errorf("x-rewritten = %q", got)
+		}
+		if got := vars["seen"]; got != "yes" {
+			t.Errorf("vars[seen] = %v", got)
+		}
+		if got := vars["layer"]; got != "ran" {
+			t.Errorf("vars[layer] = %v", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if !called {
+		t.Fatal("next handler was not called")
+	}
+}
+
+func TestServeHTTPVarsDoNotSeePlaceholders(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", `export default function handler(http) {
+	http.respond(200, {"content-type": "text/plain"}, (http.vars.site ?? "missing") + "|" + site)
+}
+`)
+	h := &Handler{Options: config.Options{ScriptPath: path}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	repl := caddy.NewReplacer()
+	repl.Map(func(key string) (any, bool) {
+		if key == "site" {
+			return "mapped", true
+		}
+		return nil, false
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+
+	rec := httptest.NewRecorder()
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if got := rec.Body.String(); got != "missing|mapped" {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestServeHTTPBarePlaceholders(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", `export default function handler(http) {
+	http.respond(200, {"content-type": "text/plain"}, site + "|" + host)
+}
+`)
+	h := &Handler{Options: config.Options{ScriptPath: path}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	repl := caddy.NewReplacer()
+	repl.Map(func(key string) (any, bool) {
+		if key == "site" {
+			return "mapped", true
+		}
+		return nil, false
+	})
+	repl.Set("http.request.host", "example.test")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+
+	rec := httptest.NewRecorder()
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if got := rec.Body.String(); got != "mapped|example.test" {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestServeHTTPBarePlaceholderWriteBack(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", `export default function handler(http) {
+	site = "changed"
+	fresh = "new"
+}
+`)
+	h := &Handler{Options: config.Options{ScriptPath: path, Fallthrough: true}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	repl := caddy.NewReplacer()
+	repl.Map(func(key string) (any, bool) {
+		if key == "site" {
+			return "mapped", true
+		}
+		return nil, false
+	})
+	vars := make(map[string]any)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+	req = req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars))
+
+	rec := httptest.NewRecorder()
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+		if _, ok := vars["site"]; ok {
+			t.Error("a bare write landed in the vars table")
+		}
+		if _, ok := vars["fresh"]; ok {
+			t.Error("a bare write landed in the vars table")
+		}
+		repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+		if value, ok := repl.Get("site"); !ok || value != "changed" {
+			t.Errorf("replacer site = %v, %v", value, ok)
+		}
+		if value, ok := repl.Get("fresh"); !ok || value != "new" {
+			t.Errorf("replacer fresh = %v, %v", value, ok)
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+}
