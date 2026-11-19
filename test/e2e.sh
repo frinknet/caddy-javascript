@@ -87,6 +87,7 @@ http://chain.example:80 {
 	javascript /app/chain-auth.js
 	javascript /app/chain-site.js
 }
+
 CADDY
 
 echo ""
@@ -254,6 +255,44 @@ check "bare globals and http.vars stay separate" GET /vars/page.html --host vars
 
 check "a javascript directive that responds stops the chain" GET "/chain?token=no" --host chain.example --status 401 --equals 'unauthorized'
 check "an unanswered javascript directive continues to the next one" GET "/chain?token=secret" --host chain.example --status 200 --equals 'token=secret'
+
+echo ""
+echo "=== Test 1b: worker config ==="
+worker=0
+i=0
+while [ "$i" -lt 30 ]; do
+	if [ "$(curl -s --max-time 2 "$BASE/worker/config")" = "worker" ]; then
+		worker=1
+		break
+	fi
+	i=$((i + 1))
+	sleep 1
+done
+if [ "$worker" -eq 1 ]; then
+	echo "  PASS: the worker added a native route through config.apply"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: the worker never added a native route"
+	FAIL=$((FAIL + 1))
+fi
+
+state=""
+i=0
+while [ "$i" -lt 30 ]; do
+	state=$(curl -s --max-time 2 "$BASE/worker/state")
+	if [ "$state" = "calls=1" ]; then
+		break
+	fi
+	i=$((i + 1))
+	sleep 1
+done
+if [ "$state" = "calls=1" ]; then
+	echo "  PASS: the worker survived its own reload"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: worker state after reload is $state"
+	FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "=== Test 2: configuration validation ==="

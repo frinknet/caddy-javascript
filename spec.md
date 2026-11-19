@@ -1,20 +1,23 @@
 # Technical Specification: Caddy JavaScript Runtime
 
-Status: target design. Implemented today: one go-quickjs VM per site per
-configuration generation, joined by the site entry and its handle directives;
-ESM evaluation with a sandboxed loader and a provision deadline; a generation
-registry keyed by host matcher set or explicit `site`; a per-request `http`
+Status: target design. Implemented today: one go-quickjs VM per site, reused
+across configuration reloads when the VM options are unchanged, joined by the
+site entry and its handle directives;
+ESM evaluation with a sandboxed loader and a provision deadline; a process-wide
+site VM pool keyed by host matcher set or explicit `site`; a per-request `http`
 object with request facts, headers, a bounded body, cookies, a live vars proxy,
-`rewrite`, and `respond`; and `route()` JavaScript layers. The rest of
-this file is the target. `README.md` documents what runs today.
+`rewrite`, and `respond`; `route()` JavaScript layers; and the global worker's
+mutable `config` object, committed through the admin endpoint while the worker
+VM survives the reload. The rest of this file is the target. `README.md`
+documents what runs today.
 
 ## 1. Vision
 
 Run JavaScript as a first-class Caddy runtime, not as an Express emulation.
 
 - One warm VM per site. A site is the unit of identity, configuration, and
-  state. The entry module and its imports are compiled and evaluated once per
-  configuration generation.
+  state. The entry module and its imports are compiled and evaluated once; a
+  reload reuses the VM when its options are unchanged.
 - One warm VM per worker. A worker has its own scope, its own event loop, and
   no HTTP surface.
 - A fresh `http` object per request. There is no per-request VM and no
@@ -34,7 +37,7 @@ memory requirements.
 A VM is one `*quickjs.Runtime` on one goroutine. The runtime is not safe for
 concurrent use; the VM's loop is the only goroutine that touches it.
 
-- `server` VMs serve HTTP for one site and hold the site's JavaScript state.
+- Site VMs serve HTTP for one site and hold the site's JavaScript state.
 - `worker` VMs have no HTTP surface. They receive messages, timers, events, and
   filesystem or network work posted to their loop.
 - The `global.js` VM is a worker. It is not a shared realm; site VMs cannot see
@@ -109,8 +112,8 @@ example.com {
 A `javascript` directive inside a matcher block loads its module into the
 enclosing site VM and binds the module's default export as the lambda for the
 Caddy route that contains the directive. The lambda runs when Caddy routes a
-request to that handler. It shares the site VM's realm, module cache, `server`
-object, and timers.
+request to that handler. It shares the site VM's realm, module cache, and
+timers.
 
 Handle directives are evaluated inside the site VM by construction, so they
 inherit the site's identity without inspecting the request. At provisioning
@@ -123,8 +126,9 @@ time the handler resolves the site VM as follows:
 3. If there is no host matcher (a catch-all site or a named route), fall back to
    the route index and, for named routes, the named route key.
 
-The registry is scoped to one configuration generation. A handle directive
-joins an existing site VM or creates it, so provisioning order does not matter.
+Site VMs are process-wide. A handle directive joins an existing site VM or
+creates it, so provisioning order does not matter. A reload adopts a running VM
+when the site's VM options are unchanged.
 
 ### 3.4 Options
 
@@ -144,26 +148,44 @@ resolved at provisioning time; a missing file is an error, not a runtime 404.
 
 ## 4. JavaScript surface
 
-### 4.1 `server`
+### 4.1 `config`
 
-`server` is the site's configuration draft. It is a mutable JavaScript object
-seeded from the site's route subtree in the active Caddy config. It is not the
+`config` is the global worker's mutable copy of the whole Caddy configuration.
+Site VMs have no `config`, and no request-time object exposes it. It is not the
 global object, and it is not the live Go configuration.
 
-- Mutations are recorded in the draft. Before the next dispatch, the VM
-  recompiles its JavaScript router from the draft, so `server.routes` edits take
-  effect for subsequent requests without a Caddy reload.
-- The draft covers the site's routes and handlers only. Listener addresses, TLS
-  policies, storage, and other servers are read-only or absent.
-- `server.apply()` sends the site subtree to Caddy. It is the only way a change
-  to Caddy-native handlers, matchers, or TLS takes effect. Apply is a config
-  load: the VM is replaced and all state is lost. It is fire-and-forget from the
-  calling VM; a promise cannot resolve in a VM that is being torn down.
-- Apply runs off the VM goroutine. `Handler.Cleanup` waits for the VM loop, so a
-  load started on that loop deadlocks.
-- Apply is serialized process-wide, canonicalized, and skipped when the site
-  subtree is unchanged. A script that mutates and applies unconditionally in
-  top-level code reloads forever; that is a configuration error.
+- The worker seeds `config` from the admin endpoint once Caddy is listening. On
+  the first process start the admin endpoint does not exist during provisioning,
+  so a module-scope read may see `config` as undefined. Scripts use it from a
+  timer, event, or message, or check `globalThis.config`.
+- Edits are local until `config.apply()` serializes the object, verifies that
+  `apps.javascript` is still present, and loads it through the admin endpoint.
+  Apply returns `true` when a load was started and `false` when the document is
+  unchanged or another load is already in flight. It is fire-and-forget: the
+  load runs off the VM goroutine and a failure is logged.
+- One load runs at a time per worker. A failed load leaves the old
+  configuration serving. The admin address comes from `CADDY_ADMIN` and
+  defaults to `localhost:2019`; with the admin endpoint disabled, `config` is
+  not seeded and apply cannot run.
+- `config.caddyfile(path)` adapts a Caddyfile inside the ESM root and returns a
+  plain config object. It has no side effects and does not modify `config`.
+  Warnings are logged. Adaptation resolves `import`s relative to the file, so
+  imported files can leave the ESM root; the path is trusted input.
+- A reload reuses the running global worker VM, so module state, timers, and
+  ports survive `config.apply()`. Site VMs are reused when the site's root,
+  memory limit, and queue size are unchanged; a changed script loads a new
+  module into the same VM. A changed VM option or a removed site closes the VM
+  when the last handler releases it.
+- A reload is a normal config load. Caddy provisions the new generation before
+  cleaning up the old one, so the new handlers adopt the VM before the old
+  handlers release it.
+- An edit during module evaluation (top-level code) is a configuration error:
+  every reload would edit and reload again. Edit `config` from a timer, event,
+  or message.
+- Sites do not edit the configuration directly. When messaging lands, a site
+  asks the worker for a change and the worker is the only writer. Until then,
+  an external admin portal is a second writer and must not share config
+  ownership with the worker.
 - The live `*caddyhttp.Server` is never mutated from JavaScript. Caddy
   provisions and compiles routes and handler chains once, and request goroutines
   read them concurrently.
@@ -178,7 +200,6 @@ Every request receives a fresh `http` object. It carries:
 - `respond(status, headers, body)`, terminal.
 - `rewrite({method, path, headers})`, which mutates the real `*http.Request`
   (`URL.Path`, `RawPath`, `RequestURI`, headers) and continues.
-- `server`, the site's `server` object.
 - `signal`, cancelled when the client disconnects or the request deadline ends.
 
 ### 4.3 Chain
@@ -328,9 +349,9 @@ a change there does not leak into scripts.
 5. Set the module loader to the sandbox.
 6. Evaluate the entry module with a provision deadline. A syntax error or a
    rejected top-level await fails the config load.
-7. Register the site VM in the generation registry.
+7. Register the site VM in the site VM pool.
 
-Handles attach to the site VM through the registry; they do not create a second
+Handles attach to the site VM through the pool; they do not create a second
 runtime.
 
 ### 5.2 Reload
@@ -377,7 +398,7 @@ Therefore:
 - `javascript.go` at the repository root is the only Go file there. It blank
   imports the packages so their `init` registrations run.
 - `pkg/config`: options, Caddyfile parsing, validation.
-- `pkg/vm`: runtime construction, loop, generation registry, entry evaluation.
+- `pkg/vm`: runtime construction, loop, entry evaluation, and the worker `config` object.
 - `pkg/bridge`: `http`, request, response, headers, cookies, fetch, fs, timers.
 - `pkg/template`: the `_` registry and typed conversion.
 - `pkg/worker`: messaging, ports, events, worker construction.
@@ -388,18 +409,19 @@ Therefore:
 ## 8. Testing
 
 - Unit tests cover option parsing, chain ordering, typed template conversion,
-  structured clone and ports, generation scoping, and the mutable `server`
-  draft.
+  structured clone and ports, reload reuse, and the worker `config` object.
 - End-to-end tests use the image built by `./build.sh` and the harness in
   `test/`, with exact-byte comparisons. They cover:
   - state persists across requests in one site;
   - two sites do not share state;
-  - a reload rebuilds VMs and drops state;
+  - a reload keeps the global worker VM and its state; site VMs survive when
+    their VM options are unchanged, and a changed script loads into the same VM;
   - `route`, `respond`, and `rewrite` ordering, including a
     multi-directive chain;
   - `http.vars` visibility in downstream templates;
   - worker messages, ports, and teardown;
-  - `server` draft mutation and `server.apply()` failure and success;
+  - worker `config` seeding, `config.apply()`, `config.caddyfile()`, and worker
+    survival across the reload it triggers;
   - a missing or invalid script fails `caddy validate`.
 
 Substring checks are not a substitute for exact bytes.
@@ -418,10 +440,11 @@ Substring checks are not a substitute for exact bytes.
 
 ## 10. Current state
 
-The configuration surface, one go-quickjs VM per site per generation, ESM
+The configuration surface, one go-quickjs VM per site, ESM
 evaluation with a sandboxed loader, a per-request `http` (request facts,
 `headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
 and `respond`), `route()` layers, timeouts, memory limits, queue
-admission, and VM cleanup on reload are implemented. Workers and messages, the
-mutable `server` draft, `_`, events, fetch, `fs`, `env_allow`, and watching
-remain.
+admission, VM reuse across reloads when the VM options are unchanged, and the
+global worker's mutable `config` object with `config.apply()` and
+`config.caddyfile()` are implemented. Workers and messages, `_`, events, fetch,
+`fs`, `env_allow`, and watching remain.

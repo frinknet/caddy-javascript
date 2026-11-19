@@ -306,31 +306,37 @@ func TestSiteOptionSharesVMs(t *testing.T) {
 	}
 }
 
-func TestGenerationsDoNotShareVMs(t *testing.T) {
+func TestSiteVMReusedWhenTheScriptChanges(t *testing.T) {
 	dir := t.TempDir()
-	script := writeScript(t, dir, "main.js", respondScript)
+	firstScript := writeScript(t, dir, "first.js", respondScript)
+	secondScript := writeScript(t, dir, "second.js", respondScript)
 
-	newServer := func() *caddyhttp.Server {
-		return &caddyhttp.Server{Routes: caddyhttp.RouteList{
-			{MatcherSets: hostMatchers("example.com"), HandlersRaw: []json.RawMessage{javaScriptHandlerRaw}},
-		}}
+	newServer := func(script string) *caddyhttp.Server {
+		return &caddyhttp.Server{
+			Listen: []string{":80"},
+			Routes: caddyhttp.RouteList{{
+				MatcherSetsRaw: caddyhttp.RawMatcherSets{caddy.ModuleMap{
+					"host": json.RawMessage(`["example.com"]`),
+				}},
+				HandlersRaw: []json.RawMessage{javascriptRouteRaw(t, script)},
+			}},
+		}
 	}
-	oldServer, newServerInstance := newServer(), newServer()
 
-	oldHandler := &Handler{Options: config.Options{ScriptPath: script}}
-	if err := oldHandler.Provision(serverContext(oldServer)); err != nil {
-		t.Fatalf("Provision old: %v", err)
+	first := &Handler{Options: config.Options{ScriptPath: firstScript}}
+	if err := first.Provision(serverContext(newServer(firstScript))); err != nil {
+		t.Fatalf("Provision first: %v", err)
 	}
-	defer oldHandler.Cleanup()
+	defer first.Cleanup()
 
-	newHandler := &Handler{Options: config.Options{ScriptPath: script}}
-	if err := newHandler.Provision(serverContext(newServerInstance)); err != nil {
-		t.Fatalf("Provision new: %v", err)
+	second := &Handler{Options: config.Options{ScriptPath: secondScript}}
+	if err := second.Provision(serverContext(newServer(secondScript))); err != nil {
+		t.Fatalf("Provision second: %v", err)
 	}
-	defer newHandler.Cleanup()
+	defer second.Cleanup()
 
-	if oldHandler.vm == newHandler.vm {
-		t.Fatal("two configuration generations share one VM")
+	if first.vm != second.vm {
+		t.Fatal("a changed script replaced the VM")
 	}
 }
 
@@ -593,5 +599,295 @@ func TestServeHTTPClientCancellation(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("body = %q, want no error page", rec.Body.String())
+	}
+}
+
+func javascriptRouteRaw(t *testing.T, script string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"handler":     "javascript",
+		"script_path": script,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func subrouteRaw(t *testing.T, routes ...any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"handler": "subroute",
+		"routes":  routes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func nestedRouteRaw(t *testing.T, match any, handlers ...json.RawMessage) map[string]any {
+	t.Helper()
+	route := map[string]any{"handle": handlers}
+	if match != nil {
+		route["match"] = match
+	}
+	return route
+}
+
+func responseFor(t *testing.T, h *Handler, method, target string) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, target, nil)
+	req.Host = "example.com"
+	if err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	})); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	return rec.Body.String()
+}
+
+func TestSiteDirectivesShareOneVM(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", respondScript)
+	api := writeScript(t, dir, "api.js", `export default function handler(http) {
+	http.respond(200, {}, "api")
+}
+`)
+
+	subroute := subrouteRaw(t,
+		nestedRouteRaw(t,
+			[]any{map[string]any{"path": []any{"/api/*"}}},
+			subrouteRaw(t, nestedRouteRaw(t, nil, javascriptRouteRaw(t, api)))),
+		nestedRouteRaw(t, nil, javascriptRouteRaw(t, site)),
+	)
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{{
+		MatcherSetsRaw: caddyhttp.RawMatcherSets{caddy.ModuleMap{
+			"host": json.RawMessage(`["example.com"]`),
+		}},
+		HandlersRaw: []json.RawMessage{subroute},
+	}}}
+	ctx := serverContext(srv)
+
+	first := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := first.Provision(ctx); err != nil {
+		t.Fatalf("Provision site: %v", err)
+	}
+	defer first.Cleanup()
+
+	second := &Handler{Options: config.Options{ScriptPath: api}}
+	if err := second.Provision(ctx); err != nil {
+		t.Fatalf("Provision api: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("site directives own different VMs")
+	}
+	if got := responseFor(t, first, http.MethodGet, "/"); got != "GET /" {
+		t.Errorf("site body = %q", got)
+	}
+	if got := responseFor(t, second, http.MethodGet, "/anything"); got != "api" {
+		t.Errorf("api body = %q", got)
+	}
+}
+
+func TestSiteAcceptsProgrammaticRoute(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", respondScript)
+
+	srv := &caddyhttp.Server{Routes: caddyhttp.RouteList{{
+		MatcherSetsRaw: caddyhttp.RawMatcherSets{caddy.ModuleMap{
+			"host": json.RawMessage(`["example.com"]`),
+		}},
+		HandlersRaw: []json.RawMessage{javaScriptHandlerRaw},
+	}}}
+	ctx := serverContext(srv)
+
+	h := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := h.Provision(ctx); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	if got := responseFor(t, h, http.MethodGet, "/"); got != "GET /" {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestSiteVMReusedAcrossGenerations(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", `let hits = 0
+export default function handler(http) {
+	hits++
+	http.respond(200, {}, "hits=" + hits)
+}
+`)
+
+	newServer := func() *caddyhttp.Server {
+		return &caddyhttp.Server{
+			Listen: []string{":80"},
+			Routes: caddyhttp.RouteList{{
+				MatcherSetsRaw: caddyhttp.RawMatcherSets{caddy.ModuleMap{
+					"host": json.RawMessage(`["example.com"]`),
+				}},
+				HandlersRaw: []json.RawMessage{javascriptRouteRaw(t, site)},
+			}},
+		}
+	}
+
+	first := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := first.Provision(serverContext(newServer())); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+	if got := responseFor(t, first, http.MethodGet, "/"); got != "hits=1" {
+		t.Fatalf("first body = %q", got)
+	}
+
+	second := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := second.Provision(serverContext(newServer())); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("a reload that only changes routes replaced the VM")
+	}
+	if err := first.Cleanup(); err != nil {
+		t.Fatalf("cleanup first: %v", err)
+	}
+	if got := responseFor(t, second, http.MethodGet, "/"); got != "hits=2" {
+		t.Errorf("state did not survive the reload, body = %q", got)
+	}
+}
+
+func TestSiteVMRecreatedWhenOptionsChange(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", respondScript)
+
+	newServer := func() *caddyhttp.Server {
+		return &caddyhttp.Server{
+			Listen: []string{":80"},
+			Routes: caddyhttp.RouteList{{
+				MatcherSetsRaw: caddyhttp.RawMatcherSets{caddy.ModuleMap{
+					"host": json.RawMessage(`["example.com"]`),
+				}},
+				HandlersRaw: []json.RawMessage{javascriptRouteRaw(t, site)},
+			}},
+		}
+	}
+
+	first := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := first.Provision(serverContext(newServer())); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+
+	second := &Handler{Options: config.Options{ScriptPath: site, Memory: 32 << 20}}
+	if err := second.Provision(serverContext(newServer())); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm == second.vm {
+		t.Fatal("a changed memory limit reused the VM")
+	}
+}
+
+func TestSiteVMReusedWhenAMountShiftsTheRoute(t *testing.T) {
+	dir := t.TempDir()
+	site := writeScript(t, dir, "site.js", `let hits = 0
+export default function handler(http) {
+	hits++
+	http.respond(200, {}, "hits=" + hits)
+}
+`)
+	javascript := &caddyhttp.Route{
+		HandlersRaw: []json.RawMessage{javascriptRouteRaw(t, site)},
+	}
+	static := &caddyhttp.Route{
+		HandlersRaw: []json.RawMessage{mustJSON(t, map[string]any{
+			"handler": "static_response",
+			"body":    "native",
+		})},
+	}
+
+	oldServer := &caddyhttp.Server{Listen: []string{":80"}, Routes: caddyhttp.RouteList{*javascript}}
+	newServer := &caddyhttp.Server{Listen: []string{":80"}, Routes: caddyhttp.RouteList{*static, *javascript}}
+
+	first := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := first.Provision(serverContext(oldServer)); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+	responseFor(t, first, http.MethodGet, "/")
+
+	second := &Handler{Options: config.Options{ScriptPath: site}}
+	if err := second.Provision(serverContext(newServer)); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("a mount that shifted the site route replaced the VM")
+	}
+	if got := responseFor(t, second, http.MethodGet, "/"); got != "hits=2" {
+		t.Errorf("state did not survive the mount, body = %q", got)
+	}
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestAppVMReusedAcrossGenerations(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "global.js", "export default {}\n")
+
+	first := &App{Options: config.Options{ScriptPath: script}}
+	if err := first.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+
+	second := &App{Options: config.Options{ScriptPath: script}}
+	if err := second.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm != second.vm {
+		t.Fatal("a reload replaced the global worker VM")
+	}
+	if err := first.Cleanup(); err != nil {
+		t.Fatalf("cleanup first: %v", err)
+	}
+}
+
+func TestAppVMRecreatedWhenOptionsChange(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "global.js", "export default {}\n")
+
+	first := &App{Options: config.Options{ScriptPath: script}}
+	if err := first.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision first: %v", err)
+	}
+	defer first.Cleanup()
+
+	second := &App{Options: config.Options{ScriptPath: script, Memory: 32 << 20}}
+	if err := second.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision second: %v", err)
+	}
+	defer second.Cleanup()
+
+	if first.vm == second.vm {
+		t.Fatal("a changed memory limit reused the worker VM")
 	}
 }

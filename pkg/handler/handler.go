@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -22,7 +23,7 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(App{})
+	caddy.RegisterModule(&App{})
 	caddy.RegisterModule(Handler{})
 	httpcaddyfile.RegisterGlobalOption("javascript", parseGlobal)
 	httpcaddyfile.RegisterDirective("javascript", parseDirective)
@@ -32,11 +33,13 @@ func init() {
 type App struct {
 	config.Options
 
-	vm     *vm.VM
-	logger *zap.Logger
+	vm          *vm.VM
+	pool        string
+	logger      *zap.Logger
+	releaseOnce sync.Once
 }
 
-func (App) CaddyModule() caddy.ModuleInfo {
+func (*App) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "javascript",
 		New: func() caddy.Module { return new(App) },
@@ -53,32 +56,87 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return err
 	}
-	v, err := vm.New(vm.Config{
+
+	cfg := vm.Config{
 		ScriptPath:     script,
 		RootDir:        root,
 		Memory:         a.Memory,
 		QueueSize:      a.QueueSize,
 		RequireHandler: false,
 		Logger:         a.logger,
-	})
+		Caddy:          &vm.CaddyConfig{Apply: applyCaddyConfig},
+	}
+	provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
+	defer cancel()
+	v, key, reused, err := acquireApp(provisionCtx, cfg)
 	if err != nil {
 		return err
 	}
 	a.vm = v
+	a.pool = key
+	if !reused || !v.HasConfig() {
+		a.seedConfig(ctx, v)
+	}
 	return nil
+}
+
+// seedConfig installs the worker's config object once the admin endpoint is
+// reachable. On the first load it is started after the app, so the fetch is
+// retried for a bounded time.
+func (a *App) seedConfig(ctx caddy.Context, v *vm.VM) {
+	cctx := ctx.Context
+	if cctx == nil {
+		cctx = context.Background()
+	}
+	go func() {
+		deadline := time.NewTimer(30 * time.Second)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer deadline.Stop()
+		defer ticker.Stop()
+
+		attempt := func() bool {
+			value, err := readAdminConfig(2 * time.Second)
+			if err != nil {
+				return false
+			}
+			if err := v.SetConfig(cctx, &vm.CaddyConfig{Value: value, Apply: applyCaddyConfig}); err != nil {
+				return true
+			}
+			return true
+		}
+		if attempt() {
+			return
+		}
+		for {
+			select {
+			case <-cctx.Done():
+				return
+			case <-deadline.C:
+				if a.logger != nil {
+					a.logger.Warn("javascript: config object was not seeded; admin endpoint unavailable")
+				}
+				return
+			case <-ticker.C:
+				if attempt() {
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (a *App) Start() error { return nil }
 
-func (a *App) Stop() error { return a.closeVM() }
+func (a *App) Stop() error { return a.release() }
 
-func (a *App) Cleanup() error { return a.closeVM() }
+func (a *App) Cleanup() error { return a.release() }
 
-func (a *App) closeVM() error {
-	if a.vm == nil {
-		return nil
-	}
-	return a.vm.Close()
+func (a *App) release() error {
+	var err error
+	a.releaseOnce.Do(func() {
+		err = releaseApp(a.pool)
+	})
+	return err
 }
 
 type Handler struct {
@@ -124,11 +182,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if site, ok := h.bindSite(ctx); ok {
 		provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
 		defer cancel()
-		v, err := site.gen.join(provisionCtx, site.key, cfg)
+		v, key, err := acquireSite(provisionCtx, site, cfg)
 		if err != nil {
 			site.gen.discard(site.srv)
 			return err
 		}
+		site.pool = key
+		site.gen.hold()
 		h.vm = v
 		h.site = &site
 		return nil
@@ -147,7 +207,9 @@ func (h *Handler) Cleanup() error {
 		site := h.site
 		h.site = nil
 		h.vm = nil
-		return site.gen.release(site.srv, site.key)
+		err := releaseSite(site.pool)
+		site.gen.drop(site.srv)
+		return err
 	}
 	v := h.vm
 	h.vm = nil

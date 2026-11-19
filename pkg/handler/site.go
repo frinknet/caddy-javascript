@@ -1,7 +1,8 @@
 package handler
 
 import (
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -10,16 +11,12 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-
-	"github.com/frinknet/caddy-javascript/pkg/vm"
 )
 
-// generation is the provisioning state of one configuration generation. It is
-// keyed by the server it belongs to, so an old and a new generation never
-// share a site VM.
+// generation tracks one configuration generation's handlers. Site VMs live in
+// the process-wide pool instead, so a reload can reuse them.
 type generation struct {
 	mu       sync.Mutex
-	registry *vm.Registry
 	handlers int
 	refs     int
 }
@@ -27,15 +24,17 @@ type generation struct {
 var generations sync.Map // *caddyhttp.Server -> *generation
 
 func generationFor(srv *caddyhttp.Server) *generation {
-	actual, _ := generations.LoadOrStore(srv, &generation{registry: vm.NewRegistry()})
+	actual, _ := generations.LoadOrStore(srv, &generation{})
 	return actual.(*generation)
 }
 
-// siteRef is one handler's attachment to a site VM in a generation registry.
+// siteRef is one handler's attachment to the site VM pool.
 type siteRef struct {
-	srv *caddyhttp.Server
-	gen *generation
-	key string
+	srv      *caddyhttp.Server
+	gen      *generation
+	key      string
+	identity string
+	pool     string
 }
 
 func (g *generation) nextOrdinal() int {
@@ -46,19 +45,13 @@ func (g *generation) nextOrdinal() int {
 	return ordinal
 }
 
-func (g *generation) join(ctx context.Context, key string, cfg vm.Config) (*vm.VM, error) {
-	v, err := g.registry.Join(ctx, key, cfg)
-	if err != nil {
-		return nil, err
-	}
+func (g *generation) hold() {
 	g.mu.Lock()
 	g.refs++
 	g.mu.Unlock()
-	return v, nil
 }
 
-func (g *generation) release(srv *caddyhttp.Server, key string) error {
-	err := g.registry.Release(key)
+func (g *generation) drop(srv *caddyhttp.Server) {
 	g.mu.Lock()
 	g.refs--
 	idle := g.refs == 0
@@ -66,7 +59,6 @@ func (g *generation) release(srv *caddyhttp.Server, key string) error {
 	if idle {
 		generations.CompareAndDelete(srv, g)
 	}
-	return err
 }
 
 // discard drops a generation that no handler attached to, such as after a
@@ -80,8 +72,8 @@ func (g *generation) discard(srv *caddyhttp.Server) {
 	}
 }
 
-// bindSite resolves the site key for this handler. It reports false when there
-// is no enclosing server, in which case the handler owns a private VM.
+// bindSite resolves the site identity for this handler. It reports false when
+// there is no enclosing server, in which case the handler owns a private VM.
 func (h *Handler) bindSite(ctx caddy.Context) (siteRef, bool) {
 	if ctx.Context == nil {
 		return siteRef{}, false
@@ -94,9 +86,10 @@ func (h *Handler) bindSite(ctx caddy.Context) (siteRef, bool) {
 	gen := generationFor(srv)
 	ordinal := gen.nextOrdinal()
 
-	var key string
+	var key, identity string
 	if h.Site != "" {
 		key = "site:" + h.Site
+		identity = key
 	} else {
 		route, index, ok := handlerRoute(srv, ordinal)
 		if !ok {
@@ -104,12 +97,27 @@ func (h *Handler) bindSite(ctx caddy.Context) (siteRef, bool) {
 		}
 		if hostKey, ok := routeHostKey(route); ok {
 			key = hostKey
+			identity = hostKey
 		} else {
 			key = "route:" + strconv.Itoa(index)
+			identity = routeIdentity(route, h.script)
 		}
 	}
 
-	return siteRef{srv: srv, gen: gen, key: key}, true
+	return siteRef{srv: srv, gen: gen, key: key, identity: identity}, true
+}
+
+// routeIdentity keeps a hostless site's VM stable when a mount shifts its
+// top-level route index.
+func routeIdentity(route *caddyhttp.Route, script string) string {
+	var matchers []byte
+	if len(route.MatcherSetsRaw) > 0 {
+		matchers, _ = json.Marshal(route.MatcherSetsRaw)
+	} else if len(route.MatcherSets) > 0 {
+		matchers, _ = json.Marshal(route.MatcherSets)
+	}
+	sum := sha256.Sum256(append(matchers, script...))
+	return "route:" + hex.EncodeToString(sum[:])
 }
 
 // handlerRoute returns the top-level route that contains the javascript

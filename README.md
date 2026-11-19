@@ -4,12 +4,16 @@ Run ESM JavaScript inside Caddy as a native runtime. The target design is in
 [`spec.md`](spec.md).
 
 **Status: one VM per site.** A site block creates one
-[go-quickjs](https://github.com/go-quickjs/go-quickjs) VM per configuration
-generation; its top-level directives and its `handle` directives share that VM's
-realm, module cache, and entry modules. The global option evaluates a worker
-entry but does not dispatch requests. The `http` object carries the request and
-its helpers, and `route()` registers JavaScript layers. Workers, messaging,
-`server`, `_`, events, fetch, and filesystem access are not implemented yet.
+[go-quickjs](https://github.com/go-quickjs/go-quickjs) VM; its top-level
+directives and its `handle` directives share that VM's realm, module cache, and
+entry modules. A configuration reload reuses the site VM when its `root`,
+`memory`, and `queue_size` are unchanged, so a route or mount edit keeps module
+state. The
+global option evaluates a worker entry but does not dispatch requests. The
+`http` object carries the request and its helpers, `route()` registers
+JavaScript layers, and the global worker owns `config`, the whole Caddy
+configuration. Workers, messaging, `_`, events, fetch, and filesystem access
+are not implemented yet.
 
 ## What works today
 
@@ -22,8 +26,10 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
   matcher set. An explicit `site` name overrides that discovery. Provisioning
   order does not matter, and a module imported by two directives is evaluated
   once.
-- The site VM belongs to one configuration generation. A reload provisions a
-  new registry and new VMs; an old generation never shares a VM with a new one.
+- A site VM is process-wide. A reload that leaves `root`, `memory`, and
+  `queue_size` unchanged reuses it; a changed script loads into the same VM. A
+  changed VM option provisions a new VM, and a removed site closes its VM when
+  the last handler releases it.
 - ESM imports resolve inside `root`. Bare specifiers, npm, CommonJS, and paths
   outside the root are rejected.
 - Each request gets a fresh `http` object with `method`, `url`, `path`,
@@ -61,6 +67,32 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
   responds stops the chain, so the default export does not run. A string
   matcher matches a path exactly, or a prefix when it ends in `*`; a function
   matcher receives `http`.
+- `config` is the global worker's copy of the whole Caddy configuration, plus
+  `config.apply()` and `config.caddyfile(path)`. Site VMs have no `config`
+  object. The worker seeds `config` from the admin endpoint once Caddy is
+  listening, so a module-scope read during the first load may see it as
+  undefined. Use it from a timer, event, or message, or check
+  `globalThis.config`.
+- `config.apply()` serializes `config`, validates that `apps.javascript` is
+  still present, and loads it through the admin endpoint. It returns `true`
+  when it started a load, and `false` when the document is unchanged or
+  another load is already in flight. A failure is logged; the old
+  configuration keeps serving. The admin address comes from `CADDY_ADMIN`,
+  defaulting to `localhost:2019`; with the admin endpoint disabled, `config`
+  is not seeded and `apply()` cannot run.
+- The reload reuses the global worker VM, so module state, timers, and ports
+  survive `config.apply()`. Site VMs are reused too when the site's
+  `root`, `memory`, and `queue_size` are unchanged; a changed script loads a
+  new module into the same VM. A changed option or a removed site closes the
+  VM when the last handler releases it.
+- An edit at module scope (top-level code) is a configuration error, because
+  every reload would edit and reload again. Edit `config` from a timer, event,
+  or message.
+- `config.caddyfile(path)` adapts a Caddyfile inside the ESM root and returns a
+  plain config object. It does not apply anything and does not modify `config`.
+  Adaptation warnings are logged. Caddy resolves the file's `import`s relative
+  to the file, so imported files can leave the ESM root; treat the path as
+  trusted input.
 - `respond` writes the status, headers, and body. A handler that returns without
   responding calls the next Caddy handler; use `respond(404, ...)` to answer
   404 explicitly.
@@ -72,10 +104,28 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
   an empty body.
 - `timeout` interrupts a runaway handler and answers `504`. A full per-VM queue
   answers `503`. A thrown exception answers `500`.
-- `memory` and `queue_size` are active. A reload closes the old VMs.
+- `memory` and `queue_size` are active. A reload closes an old VM only when a
+  VM option changed or the site is gone.
 - Entry evaluation has a provision deadline. A syntax error, a rejected
   top-level await, or a runaway module fails the configuration load, so the
   previous generation keeps serving.
+
+A global worker can add a route and reload Caddy without losing its own
+state:
+
+```js
+setTimeout(() => {
+	const servers = globalThis.config?.apps?.http?.servers ?? {}
+	for (const name of Object.keys(servers)) {
+		servers[name].routes ??= []
+		servers[name].routes.unshift({
+			match: [{ path: ["/global/*"] }],
+			handle: [{ handler: "static_response", body: "global" }],
+		})
+	}
+	config.apply()
+}, 1000)
+```
 
 Parsed but not active yet: `env_allow`, `fetch_allow`, and `watch`.
 `site`, `root`, `timeout`, `memory`, and `queue_size` are active.
@@ -142,7 +192,7 @@ export default function handler(http) {
 
 Timers are installed. Handlers and route layers must finish synchronously: a
 promise returned by a handler is not awaited, and a script that responds after
-the dispatch has returned gets an error. `server`, `_`, `fetch`, `fs`, workers,
+the dispatch has returned gets an error. `_`, `fetch`, `fs`, workers,
 `MessageChannel`, and Caddy events are not available yet.
 
 ## JSON configuration
@@ -170,10 +220,10 @@ checks that invalid configurations fail `caddy validate`.
 - `javascript.go` is the only Go file at the repository root. It blank imports
   the packages that register their modules.
 - `pkg/config` holds the option schema and Caddyfile parsing.
-- `pkg/vm` holds the go-quickjs runtime, sandbox loader, event loop, generation
-  registry, and per-request dispatch.
-- `pkg/handler` holds the app, the HTTP handler, and the directive
-  registrations.
+- `pkg/vm` holds the go-quickjs runtime, sandbox loader, event loop,
+  per-request dispatch, and the worker `config` object.
+- `pkg/handler` holds the app, the HTTP handler, the directive registrations,
+  the site VM pool, and the admin reload path.
 - `test/app` holds the e2e fixture modules.
 - `test/e2e.sh` and `test/unit.sh` are the test entry points.
 - `www/Caddyfile` is the shipped image configuration.

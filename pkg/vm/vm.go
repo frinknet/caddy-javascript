@@ -38,6 +38,7 @@ type Config struct {
 	RequireHandler   bool
 	ProvisionTimeout time.Duration
 	Logger           *zap.Logger
+	Caddy            *CaddyConfig
 }
 
 // Request is one dispatch into the VM. Req carries the live request: scripts
@@ -75,6 +76,14 @@ type VM struct {
 	varsFactory   quickjs.Value
 	headerFactory quickjs.Value
 	active        *requestState
+
+	config     quickjs.Value
+	stringify  quickjs.Value
+	deleteProp quickjs.Value
+	hasConfig  bool
+	reloading  bool
+	apply      func(doc []byte) error
+	applied    []byte
 
 	slots  chan struct{}
 	closed chan struct{}
@@ -208,6 +217,10 @@ func New(cfg Config) (*VM, error) {
 		v.cleanupNew()
 		return nil, fmt.Errorf("javascript: install route(): %w", err)
 	}
+	if err := v.configureConfig(cfg.Caddy); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install config: %w", err)
+	}
 
 	v.currentScript = script
 	ns, err := rt.EvalModuleContext(provisionCtx, entryName, string(src))
@@ -215,6 +228,14 @@ func New(cfg Config) (*VM, error) {
 	if err != nil {
 		v.cleanupNew()
 		return nil, fmt.Errorf("javascript: evaluate %s: %w", entryName, err)
+	}
+
+	if edited, err := v.configEdited(); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: check config: %w", err)
+	} else if edited {
+		v.cleanupNew()
+		return nil, errors.New("javascript: config changed during module evaluation; edit it from a message or timer")
 	}
 
 	entry, err := ns.Get("default")
@@ -374,7 +395,20 @@ func portableError(err error) error {
 }
 
 func (v *VM) Load(ctx context.Context, scriptPath string) error {
-	script, err := filepath.Abs(scriptPath)
+	return v.join(ctx, Config{ScriptPath: scriptPath})
+}
+
+// Join loads the module in cfg and refreshes the VM's site block. It is used
+// when a new configuration generation adopts a running site VM.
+func (v *VM) Join(ctx context.Context, cfg Config) error {
+	return v.join(ctx, cfg)
+}
+
+// join evaluates another module in the VM and refreshes the worker's config
+// reference. It also runs when the module is already loaded, so a new
+// generation can reuse the VM.
+func (v *VM) join(ctx context.Context, cfg Config) error {
+	script, err := filepath.Abs(cfg.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("javascript: script path: %w", err)
 	}
@@ -382,30 +416,46 @@ func (v *VM) Load(ctx context.Context, scriptPath string) error {
 	v.mu.RLock()
 	_, loaded := v.entries[script]
 	v.mu.RUnlock()
-	if loaded {
-		return nil
-	}
 
 	if err := v.err(); err != nil {
 		return err
 	}
 
-	name, err := v.sandbox.name(script)
-	if err != nil {
-		return err
-	}
-	src, err := v.sandbox.read(name)
-	if err != nil {
-		return err
+	var name string
+	var src []byte
+	if !loaded {
+		name, err = v.sandbox.name(script)
+		if err != nil {
+			return err
+		}
+		src, err = v.sandbox.read(name)
+		if err != nil {
+			return err
+		}
 	}
 
 	ch := make(chan error, 1)
 	v.loop.Post(func() {
+		if err := v.configureConfig(cfg.Caddy); err != nil {
+			ch <- fmt.Errorf("javascript: install config: %w", err)
+			return
+		}
+		if loaded {
+			ch <- nil
+			return
+		}
 		v.currentScript = script
 		ns, err := v.rt.EvalModuleContext(ctx, name, string(src))
 		v.currentScript = ""
 		if err != nil {
 			ch <- fmt.Errorf("javascript: evaluate %s: %w", name, err)
+			return
+		}
+		if edited, err := v.configEdited(); err != nil {
+			ch <- fmt.Errorf("javascript: check config: %w", err)
+			return
+		} else if edited {
+			ch <- errors.New("javascript: config changed during module evaluation; edit it from a message or timer")
 			return
 		}
 		entry, err := ns.Get("default")
