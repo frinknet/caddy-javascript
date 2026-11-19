@@ -81,7 +81,7 @@ func serveFetch(t *testing.T, script string, allow []string, path string) (*http
 		t.Fatalf("no layers matched GET %s", path)
 	}
 	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: path}, params)
-	resObj := p.BuildResponse(w)
+	resObj := p.BuildResponse(w, reqObj)
 
 	if err := p.Serve(ex, 2*time.Second, func() error {
 		return p.RunChain(ex, layers, reqObj, resObj)

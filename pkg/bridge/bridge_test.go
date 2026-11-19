@@ -120,7 +120,7 @@ func TestExchangeStaysOpenForAsync(t *testing.T) {
 	w := NewResponseWriter(rec)
 	ex := NewExchange(w)
 	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/x"}, nil)
-	resObj := p.BuildResponse(w)
+	resObj := p.BuildResponse(w, reqObj)
 
 	layers, _ := p.Match("GET", "/x")
 	if len(layers) == 0 {
@@ -435,7 +435,7 @@ func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeSc
 		hdrs = headers[0]
 	}
 	reqObj := p.BuildRequest(&RequestContext{Method: method, Path: path, Headers: hdrs}, params)
-	resObj := p.BuildResponse(w)
+	resObj := p.BuildResponse(w, reqObj)
 
 	serveErr := p.Serve(ex, time.Second, func() error {
 		return p.RunChain(ex, layers, reqObj, resObj)
@@ -622,7 +622,7 @@ func TestChainReportsInterrupt(t *testing.T) {
 		t.Fatal("route not registered")
 	}
 	reqObj := p.BuildRequest(&RequestContext{Method: "GET", Path: "/spin"}, params)
-	resObj := p.BuildResponse(w)
+	resObj := p.BuildResponse(w, reqObj)
 
 	err = p.Serve(ex, 50*time.Millisecond, func() error {
 		return p.RunChain(ex, layers, reqObj, resObj)

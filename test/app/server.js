@@ -1,6 +1,15 @@
 const greet = require('./lib/greet')
 const leftpad = require('leftpad')
 const data = require('./data.json')
+const fs = require('fs')
+const path = require('path')
+
+const BASE = 'http://127.0.0.1'
+
+app.use((req, res, next) => {
+  res.set('X-Global', 'yes')
+  next()
+})
 
 app.get('/', (req, res) => {
   res.json({ ok: true, path: req.path, method: req.method })
@@ -42,6 +51,59 @@ app.get('/end', (req, res) => {
   res.status(204).end()
 })
 
+app.get('/append', (req, res) => {
+  res.append('X-Multi', 'one').append('X-Multi', ['two', 'three']).send('ok')
+})
+
+app.get('/location', (req, res) => {
+  res.location('/hello').status(201).send('ok')
+})
+
+app.get('/location-back', (req, res) => {
+  res.location('back').status(303).send('ok')
+})
+
+app.get('/cookie', (req, res) => {
+  res.cookie('sid', 'a b', {
+    path: '/app',
+    maxAge: 60000,
+    httpOnly: true,
+    sameSite: 'lax'
+  }).send('ok')
+})
+
+app.get('/sendstatus', (req, res) => {
+  res.sendStatus(418)
+})
+
+app.get('/flush', (req, res) => {
+  res.type('text/plain').flush().send('flushed')
+})
+
+app.get('/sendfile', (req, res) => {
+  res.sendFile('hello.txt', {
+    root: 'public',
+    headers: { 'X-File': 'yes' },
+    maxAge: 60000
+  })
+})
+
+app.head('/sendfile-head', (req, res) => {
+  res.sendFile('hello.txt', { root: 'public' })
+})
+
+app.get('/sendfile-missing', (req, res) => {
+  res.sendFile('nope.txt', { root: 'public' })
+})
+
+app.get('/sendfile-dotfile', (req, res) => {
+  res.sendFile('.secret', { root: 'public', dotfiles: 'deny' })
+})
+
+app.get('/sendfile-escape', (req, res) => {
+  res.sendFile('../server.js', { root: 'public' })
+})
+
 app.post('/form', (req, res) => {
   res.json(req.body)
 })
@@ -58,7 +120,7 @@ app.get('/env', (req, res) => {
 })
 
 app.get('/fetch-allowed', (req, res) => {
-  fetch('http://' + req.host + '/hello', (err, upstream) => {
+  fetch(BASE + '/hello', (err, upstream) => {
     if (err) return res.status(502).send(String(err))
     res.json({ status: upstream.status, text: upstream.text })
   })
@@ -72,14 +134,14 @@ app.get('/fetch-blocked', (req, res) => {
 })
 
 app.get('/fetch/promise', (req, res) => {
-  fetch('http://' + req.host + '/hello')
+  fetch(BASE + '/hello')
     .then((upstream) => upstream.text())
     .then((text) => res.json({ status: 200, text }))
     .catch((err) => res.status(502).send(err.message))
 })
 
 app.get('/fetch/headers', (req, res) => {
-  fetch('http://' + req.host + '/header')
+  fetch(BASE + '/header')
     .then((upstream) => res.json({
       status: upstream.status,
       ok: upstream.ok,
@@ -89,7 +151,7 @@ app.get('/fetch/headers', (req, res) => {
 })
 
 app.get('/fetch/post', (req, res) => {
-  fetch('http://' + req.host + '/echo', {
+  fetch(BASE + '/echo', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ a: 1 })
@@ -100,7 +162,7 @@ app.get('/fetch/post', (req, res) => {
 })
 
 app.get('/fetch/stream', (req, res) => {
-  fetch('http://' + req.host + '/hello')
+  fetch(BASE + '/hello')
     .then((upstream) => {
       const reader = upstream.body.getReader()
       let out = ''
@@ -128,8 +190,10 @@ const api = express()
 
 api.get('/express/hello', (req, res) => res.send('express hello'))
 api.put('/express/put', (req, res) => res.send('put ok'))
+api.patch('/express/patch', (req, res) => res.send('patch ok'))
 api.delete('/express/delete', (req, res) => res.send('delete ok'))
 api.all('/express/any', (req, res) => res.send(req.method))
+api.options('/express/options', (req, res) => res.set('Allow', 'GET, PUT, DELETE').send(''))
 api.head('/express/head', (req, res) => {
   res.set('X-Head', 'yes').send('')
 })
@@ -138,7 +202,20 @@ api.listen(3000)
 const router = express.Router()
 router.get('/hello', (req, res) => res.send('router hello'))
 router.get('/user/:id', (req, res) => res.json({ id: req.params.id }))
+router.route('/chain/:id')
+  .get((req, res) => res.json({ id: req.params.id }))
+  .post((req, res) => res.status(201).json({ created: req.params.id }))
 app.use('/api', router)
+
+const paramRouter = express.Router()
+paramRouter.param('id', (req, res, next, value, name) => {
+  req.params['seen_' + name] = value
+  next()
+})
+paramRouter.get('/item/:id', (req, res) => {
+  res.json({ id: req.params.id, seen: req.params.seen_id })
+})
+app.use('/param', paramRouter)
 
 app.use('/static', express.static('public'))
 
@@ -174,6 +251,70 @@ app.get('/throw', (req, res) => {
 app.get('/module/relative', (req, res) => res.send(greet('world')))
 app.get('/module/node-modules', (req, res) => res.send(leftpad('7')))
 app.get('/module/json', (req, res) => res.json(data))
+
+app.get('/fs/read', (req, res) => {
+  fs.readFile(path.join('public', 'hello.txt'), (err, text) => {
+    if (err) return res.status(500).send(String(err))
+    res.send(text)
+  })
+})
+
+app.get('/fs/write', (req, res) => {
+  fs.writeFile('tmp/out.txt', 'written', (err) => {
+    if (err) return res.status(500).send(String(err))
+    res.send('ok')
+  })
+})
+
+app.get('/fs/read-written', (req, res) => {
+  try {
+    res.send(fs.readFileSync('tmp/out.txt'))
+  } catch (err) {
+    res.status(500).send(String(err))
+  }
+})
+
+app.get('/fs/absolute', (req, res) => {
+  try {
+    res.send(fs.readFileSync('/public/hello.txt'))
+  } catch (err) {
+    res.status(500).send(String(err))
+  }
+})
+
+app.get('/fs/clamp', (req, res) => {
+  try {
+    res.send(fs.readFileSync('../public/hello.txt'))
+  } catch (err) {
+    res.status(500).send(String(err))
+  }
+})
+
+app.get('/fs/missing', (req, res) => {
+  fs.readFile('tmp/nope.txt', (err) => {
+    if (err) return res.status(500).send(String(err))
+    res.send('unexpected')
+  })
+})
+
+app.get('/path/join', (req, res) => {
+  res.send(path.join('a', 'b', '..', 'c'))
+})
+
+app.get('/timer', (req, res) => {
+  setTimeout(() => res.send('timer fired'), 10)
+})
+
+app.get('/interval', (req, res) => {
+  let ticks = 0
+  const id = setInterval(() => {
+    ticks++
+    if (ticks === 2) {
+      clearInterval(id)
+      res.send('interval ' + ticks)
+    }
+  }, 10)
+})
 
 app.use((req, res) => {
   res.status(404).send('not found')

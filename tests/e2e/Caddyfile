@@ -1,6 +1,0 @@
-:8080 {
-	javascript /e2e/app/server.js {
-		env_allow E2E_SECRET
-		fetch_allow caddy-sf-e2e-srv
-	}
-}

@@ -394,11 +394,16 @@ Reading the body can fail earlier; that returns `400`.
 |---|---|
 | `res.status(code)` | Set the status code. Chainable. Applies only until the response is written. |
 | `res.set(name, value)` | Set a header. Chainable. |
+| `res.append(name, value)` | Append a header value without replacing existing ones; an array appends each item. Chainable. |
 | `res.type(t)` | Set `Content-Type`. Chainable. |
 | `res.send(data)` | Send a body. Strings are sent as `text/plain; charset=utf-8`; other values are JSON-encoded as `application/json; charset=utf-8`; `null`/`undefined` send an empty body. |
 | `res.json(obj)` | JSON-encode and send with `application/json; charset=utf-8`. |
+| `res.sendStatus(code)` | Set the status, send the standard status text as `text/plain`, and finish. `204` and `304` send no body. |
 | `res.end([data])` | Send the optional body, or finish with the status already set. |
 | `res.redirect([code,] url)` | Set `Location` and finish. Default status is `302`. |
+| `res.location(url)` | Set `Location` without finishing. `'back'` uses the `Referer` header, falling back to `/`. Chainable. |
+| `res.cookie(name, value[, opts])` | Add a `Set-Cookie` header. Options: `path` (default `/`), `domain`, `maxAge` (milliseconds), `expires`, `secure`, `httpOnly`, `sameSite`, and `encode` (a function; defaults to `encodeURIComponent`). Chainable. |
+| `res.sendFile(name[, opts][, cb])` | Serve a file from the sandbox. Options: `root` (paths are confined to it), `headers` (extra response headers), `maxAge` (milliseconds, sets `Cache-Control`), and `dotfiles` (`ignore` by default, or `deny`). A missing or refused file answers `404`, or calls `cb(err)` when given. Reads are asynchronous and bodies are skipped for `HEAD`. |
 | `res.flush()` | Flush the underlying `http.ResponseWriter` when it supports it. |
 
 Rules and caveats:
@@ -747,7 +752,7 @@ not exposed outside the container by default.
 Not implemented today:
 
 - npm installation.
-- Server-side streaming responses, SSE, WebSocket upgrades, and `sendFile`.
+- Server-side streaming responses, SSE, and WebSocket upgrades.
 - Request-level cancellation of async work.
 
 `spec.md` describes the design target and the intended Express parity.
@@ -768,15 +773,11 @@ docker run --rm \
   sh -c 'gofmt -l . && go build ./... && go vet ./...'
 ```
 
-Unit tests:
+Unit tests, format check, and vet are wrapped in `test/unit.sh`, which runs
+them in the builder container under a bounded timeout:
 
 ```sh
-docker run --rm \
-  -v caddy-sf-mod:/mod \
-  -v "$PWD":/src -w /src \
-  -e GOMODCACHE=/mod -e GOCACHE=/mod/gocache -e CGO_ENABLED=0 \
-  caddy:2.11.9-builder-alpine \
-  go test -count=1 ./...
+./test/unit.sh
 ```
 
 Race detector (needs cgo, so install a compiler in the container):
@@ -790,19 +791,21 @@ docker run --rm \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=1 ./...'
 ```
 
-End-to-end suite. It builds the plugin image, starts it, and drives it over
-HTTP with assertions in `tests/e2e/cases.sh`:
+End-to-end suite. `test/e2e.sh` starts the image produced by `./build.sh`,
+mounts the app fixture at `/app`, drives every endpoint over HTTP with `curl`,
+and checks the results. It also runs provision-time validation against a set of
+bad Caddyfiles. Build the image first; the runner does not build it:
 
 ```sh
-tests/e2e/run.sh          # rebuilds the image first
-BUILD=0 tests/e2e/run.sh  # reuse the existing image
+./build.sh
+E2E_IMAGE=caddy-javascript:test sh test/e2e.sh
 ```
 
-`run.sh` is the container orchestration: it copies `tests/e2e/app` to a temp
-directory and mounts it at `/e2e/app` in the server, then runs `cases.sh` in a
-client container that sees the same app at `/work` so the reload check can edit
-the script. The checks are plain shell and curl, and the harness runs entirely
-in Docker, so a bare `go test ./...` stays green.
+`test/app` is the fixture. The runner copies it to a temp directory and mounts
+that copy at `/app` so the reload check can rewrite the script without touching
+the checkout. The image tag defaults to the repo slug in `NOTICE`; set
+`E2E_IMAGE` to test another tag. The harness needs only `docker` and `curl` on
+the host.
 
 Manual testing uses the sample app in `www/test`:
 
@@ -812,12 +815,13 @@ cd www/test
 ```
 
 CI runs all of the above: format, build, vet, unit tests, the race detector,
-and the e2e suite. See `.github/workflows/ci.yml`.
+the image build, and the e2e suite. See `.github/workflows/ci.yml`.
 
-When adding request/response checks, add a `check` line to
-`tests/e2e/cases.sh` instead of new Go code. The helper takes a name, method,
-path, and any of `--status`, `--ctype`, `--equals`, `--contains`, `--header`,
-`--hdr`, `--data`, and `--data-file`.
+When adding request/response checks, add a `check` line to `test/e2e.sh`
+instead of new Go code. The helper takes a name, method, path, and any of
+`--status`, `--ctype`, `--equals`, `--contains`, `--header`, `--hdr`,
+`--hdr-contains`, `--data`, and `--data-file`. `--equals` is an exact body
+comparison; the other checks match.
 
 ## Compatibility
 
@@ -842,7 +846,7 @@ pkg/bridge           Sobek runtime, JS globals, req/res, timers, fetch, watchdog
 pkg/router           route table and dispatch
 pkg/files            sandboxed fs, path.join, fsnotify hot reload
 www/test             sample Caddyfile, run.sh, and app for manual testing
-tests/e2e            end-to-end bash harness, server app, and check script
+test                 unit runner, end-to-end runner, and app fixture
 spec.md              design target
 ```
 

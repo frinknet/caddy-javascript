@@ -223,7 +223,7 @@ func (h *Handler) serve(ex *bridge.Exchange, rc *bridge.RequestContext) {
 
 	ex.SetHandled(true)
 	reqObj := prog.BuildRequest(rc, params)
-	resObj := prog.BuildResponse(w)
+	resObj := prog.BuildResponse(w, reqObj)
 
 	err := prog.Serve(ex, time.Duration(h.Timeout), func() error {
 		return prog.RunChain(ex, layers, reqObj, resObj)
