@@ -56,10 +56,15 @@ type Layer struct {
 	Arity      int
 	RouteGroup uint64
 
-	// Base is the actual path prefix consumed by enclosing mounts. The bridge
-	// uses it to resolve a static layer's directory, and it is only set on the
-	// per-request copy of a static layer.
+	// Base is the actual path prefix consumed by enclosing mounts, root first.
+	// It becomes req.baseUrl and, for static layers, locates the directory.
+	// It is only set on the per-request copy of a layer.
 	Base string
+
+	// RouterPath is the chain of routers that expanded this layer, root first.
+	// The bridge uses it to implement next('router'). It is only set on the
+	// per-request copy of a layer.
+	RouterPath []*Table
 
 	Router *Table
 	Static *Static
@@ -147,14 +152,15 @@ func (t *Table) UseStatic(path string, cfg *Static) {
 // expanded in place, so their layers keep their position in the chain.
 // Parameters from a later matching layer overwrite earlier ones.
 func (t *Table) Match(method, path string) ([]*Layer, map[string]string) {
-	return t.match(method, splitPath(path), "")
+	return t.match(method, splitPath(path), "", nil)
 }
 
-func (t *Table) match(method string, parts []string, base string) ([]*Layer, map[string]string) {
+func (t *Table) match(method string, parts []string, base string, routers []*Table) ([]*Layer, map[string]string) {
 	var (
 		matched []*Layer
 		params  map[string]string
 	)
+	routers = appendRouter(routers, t)
 	for _, layer := range t.layers {
 		if layer.Method != "" && layer.Method != method {
 			continue
@@ -164,7 +170,7 @@ func (t *Table) match(method string, parts []string, base string) ([]*Layer, map
 			if !ok {
 				continue
 			}
-			subLayers, subParams := layer.Router.match(method, parts[consumed:], joinBase(base, parts[:consumed]))
+			subLayers, subParams := layer.Router.match(method, parts[consumed:], joinBase(base, parts[:consumed]), routers)
 			if len(subLayers) == 0 {
 				continue
 			}
@@ -177,22 +183,25 @@ func (t *Table) match(method string, parts []string, base string) ([]*Layer, map
 		if !ok {
 			continue
 		}
-		out := layer
-		if layer.Static != nil {
-			if base != "" {
-				copied := *layer
-				copied.Base = base
-				out = &copied
-			}
-		} else if bindings := t.bindParams(layer, captured); len(bindings) > 0 {
-			copied := *layer
-			copied.Params = bindings
-			out = &copied
+		var bindings []ParamBinding
+		if layer.Static == nil {
+			bindings = t.bindParams(layer, captured)
 		}
-		matched = append(matched, out)
+		copied := *layer
+		copied.Base = base
+		copied.RouterPath = routers
+		copied.Params = bindings
+		matched = append(matched, &copied)
 		mergeParams(&params, captured)
 	}
 	return matched, params
+}
+
+func appendRouter(routers []*Table, t *Table) []*Table {
+	out := make([]*Table, len(routers)+1)
+	copy(out, routers)
+	out[len(routers)] = t
+	return out
 }
 
 // Relative returns the path after this layer's prefix, for a request at path.

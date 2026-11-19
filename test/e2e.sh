@@ -314,6 +314,9 @@ check "app.head matches a HEAD request" HEAD /express/head --status 200 --hdr X-
 check "app.set and app.get settings" GET /express/settings --status 200 --equals '{"disabled":true,"enabled":true,"name":"caddy"}'
 check "an async route handler completes" GET /express/async --status 200 --equals 'async ok'
 check "next('route') skips the rest of the route" GET /express/route-skip --status 200 --equals 'next route'
+check "next('router') leaves the mounted router" GET /api/router-skip --status 200 --equals 'router skip'
+check "req.baseUrl and req.route follow the mount" GET /api/mount-info --status 200 --equals '{"baseUrl":"/api","method":"GET","path":"/mount-info"}'
+check "res.format callbacks can call next" GET /express/format-next --header 'Accept: text/plain' --status 200 --equals 'format next'
 check "res.send sends a Buffer" GET /express/buffer --status 200 --ctype application/octet-stream --equals 'buffer body'
 check "res.set accepts an object" GET /express/headers --status 200 --ctype application/json --equals '{"answer":42,"header":"1"}' --hdr-contains X-Two a
 check "res.format negotiates the response type" GET /express/cookies --status 200 --header 'Accept: application/json' --header 'Cookie: sid=abc' --equals '{"sid":"abc"}'

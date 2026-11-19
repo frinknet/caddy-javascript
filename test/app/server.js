@@ -271,15 +271,26 @@ api.get('/express/cookies', (req, res) => {
 api.get('/express/download', (req, res) => {
   res.download('public/hello.txt', 'renamed.txt')
 })
+api.get('/express/format-next', (req, res) => {
+  res.format({ 'text/plain': (req, res, next) => next() })
+})
+api.use('/express/format-next', (req, res) => res.send('format next'))
 api.listen(3000)
 
 const router = express.Router()
 router.get('/hello', (req, res) => res.send('router hello'))
 router.get('/user/:id', (req, res) => res.json({ id: req.params.id }))
+router.get('/mount-info', (req, res) => {
+  res.json({ baseUrl: req.baseUrl, path: req.route.path, method: req.route.method })
+})
+router.get('/router-skip',
+  (req, res, next) => next('router'),
+  (req, res) => res.status(500).send('skipped'))
 router.route('/chain/:id')
   .get((req, res) => res.json({ id: req.params.id }))
   .post((req, res) => res.status(201).json({ created: req.params.id }))
 app.use('/api', router)
+app.get('/api/router-skip', (req, res) => res.send('router skip'))
 
 const paramRouter = express.Router()
 paramRouter.param('id', (req, res, next, value, name) => {

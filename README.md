@@ -51,9 +51,9 @@ app.use((req, res) => {
 
 - Pure Go, `CGO_ENABLED=0`, cross-compiles with `xcaddy`.
 - Express-shaped routing: `app.get`/`app.post`/`app.put`/`app.delete`/`app.all`,
-  `app.use` middleware, ordered `next()` chains, `next('route')`, path
-  parameters, optional segments, wildcards, mounted routers, and static file
-  middleware.
+  `app.use` middleware, ordered `next()` chains, `next('route')`,
+  `next('router')`, path parameters, optional segments, wildcards, mounted
+  routers, and static file middleware.
 - Express-compatible body parsing: `express.json()`, `express.urlencoded()`,
   `express.text()`, `express.raw()`, and `require('body-parser')` with the
   `limit`, `type`, `strict`, and `verify` options, plus application settings and
@@ -320,7 +320,9 @@ for `json`/`urlencoded` and `''` for `text`/`raw`.
 Layers run in registration order, the way Express runs its stack. A handler
 advances the chain with `next()`, and `next(err)` skips ahead to the next error
 handler, which is a function taking four arguments `(err, req, res, next)`.
-`next('route')` skips the rest of the current route's handlers. A handler that
+`next('route')` skips the rest of the current route's handlers. `next('router')`
+leaves the current router, including routers nested inside it, and resumes at
+the parent router's next layer. A handler that
 never calls `next()` ends the chain. Writing a response does not stop the
 chain, but the first write commits the response and later writes are ignored.
 Registering the same method and path twice appends both, so both run. A
@@ -454,7 +456,7 @@ slash redirects to the slash with `301`. Dotfiles are ignored by default.
 | `req.method` | HTTP method. |
 | `req.host` | Request `Host`, including port when present. |
 | `req.hostname` | Request host without the port. |
-| `req.baseUrl` | Mount path for the current router. Currently empty. |
+| `req.baseUrl` | Mount path consumed by enclosing routers, such as `/api/acme`; empty at the app level. |
 | `req.url` | Request path including the query string. |
 | `req.originalUrl` | Request path as received, including the query string. Equal to `req.url` because handlers never rewrite the path. |
 | `req.ip` | Client address from the connection, without the port. |
@@ -462,7 +464,7 @@ slash redirects to the slash with `301`. Dotfiles are ignored by default.
 | `req.secure` | `true` when `req.protocol` is `"https"`. |
 | `req.xhr` | `true` when `X-Requested-With` is `XMLHttpRequest`. |
 | `req.app` | The application object. |
-| `req.route` | The matched route (`path`, `method`). |
+| `req.route` | The last matched route: `path` relative to its router and `method`. Set only by routes, not middleware. |
 | `req.params` | Path parameters captured by the matched route. |
 | `req.cookies` | Cookies parsed from the `Cookie` header. |
 | `req.headers` | Object of header values, canonical names (`Content-Type`), first value only. |
@@ -513,7 +515,7 @@ above add their own, smaller checks; see their options.
 | `res.clearCookie(name[, opts])` | Add an expired `Set-Cookie` header. Chainable. |
 | `res.attachment([filename])` | Set `Content-Disposition: attachment`. Chainable. |
 | `res.download(name[, filename][, opts][, cb])` | Serve a file as an attachment. |
-| `res.format(obj)` | Negotiate the `Accept` header and invoke the matching callback. |
+| `res.format(obj)` | Negotiate the `Accept` header and invoke the matching callback with `(req, res, next)`. |
 | `res.vary(field)` | Add a `Vary` header. Chainable. |
 | `res.render(view[, options][, cb])` | Render a view with the registered engine. Without `cb`, send the result as `text/html`. |
 | `res.sendFile(name[, opts][, cb])` | Serve a file from the sandbox. Options: `root` (paths are confined to it; a bare string is accepted as the root), `headers` (extra response headers), `maxAge` (milliseconds, sets `Cache-Control`), and `dotfiles` (`ignore` by default, or `deny`). A missing or refused file answers `404`, or calls `cb(err)` when given. Reads are asynchronous and bodies are skipped for `HEAD`. |
@@ -921,7 +923,6 @@ not exposed outside the container by default.
 Not implemented today:
 
 - npm installation.
-- `next('router')`.
 - Server-side streaming responses, SSE, and WebSocket upgrades.
 - Request-level cancellation of async work.
 

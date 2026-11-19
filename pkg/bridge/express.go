@@ -321,14 +321,14 @@ func (p *Program) expandParams(layers []*router.Layer) []*router.Layer {
 				continue
 			}
 			seen[binding.Param] = true
-			out = append(out, p.paramLayer(binding))
+			out = append(out, p.paramLayer(binding, layer))
 		}
 		out = append(out, layer)
 	}
 	return out
 }
 
-func (p *Program) paramLayer(binding router.ParamBinding) *router.Layer {
+func (p *Program) paramLayer(binding router.ParamBinding, owner *router.Layer) *router.Layer {
 	param := binding.Param
 	value := binding.Value
 	fnValue := p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
@@ -336,7 +336,13 @@ func (p *Program) paramLayer(binding router.ParamBinding) *router.Layer {
 		return sobek.Undefined()
 	})
 	fn, _ := sobek.AssertFunction(fnValue)
-	return &router.Layer{Use: true, Fn: fn, Arity: 3}
+	return &router.Layer{
+		Use:        true,
+		Fn:         fn,
+		Arity:      3,
+		Base:       owner.Base,
+		RouterPath: owner.RouterPath,
+	}
 }
 
 func (p *Program) routerTable(v sobek.Value) (*router.Table, bool) {

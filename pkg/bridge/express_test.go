@@ -458,3 +458,87 @@ func TestExpressStaticExtensions(t *testing.T) {
 		t.Fatalf("status = %d body = %q, want 200 about", rec.Code, rec.Body.String())
 	}
 }
+
+func TestExpressNextRouterLeavesRouter(t *testing.T) {
+	rec, err := serveScript(t, `
+		const express = require('express')
+		const router = express.Router()
+		router.get('/skip',
+			function(req, res, next) { next('router') },
+			function(req, res) { res.send('inner') })
+		app.use('/api', router)
+		app.use(function(req, res) { res.send('parent ' + req.baseUrl) })
+	`, "GET", "/api/skip", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "parent " {
+		t.Fatalf("body = %q, want parent", got)
+	}
+}
+
+func TestExpressNextRouterLeavesNestedRouter(t *testing.T) {
+	rec, err := serveScript(t, `
+		const express = require('express')
+		const inner = express.Router()
+		inner.get('/skip', function(req, res, next) { next('router') })
+		const outer = express.Router()
+		outer.use('/v1', inner)
+		outer.use(function(req, res) { res.send('outer ' + req.baseUrl) })
+		app.use('/api', outer)
+	`, "GET", "/api/v1/skip", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "outer /api" {
+		t.Fatalf("body = %q, want outer /api", got)
+	}
+}
+
+func TestExpressBaseUrlAndRouteFollowMounts(t *testing.T) {
+	rec, err := serveScript(t, `
+		const express = require('express')
+		const inner = express.Router()
+		inner.get('/item/:id', function(req, res) {
+			res.json({ baseUrl: req.baseUrl, path: req.route.path, method: req.route.method })
+		})
+		const outer = express.Router()
+		outer.use('/v1', inner)
+		app.use('/api/:space', outer)
+	`, "GET", "/api/acme/v1/item/7", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"baseUrl":"/api/acme/v1","method":"GET","path":"/item/:id"}`
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("body = %q, want %s", got, want)
+	}
+}
+
+func TestExpressRouteStaysSetThroughMiddleware(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/x', function(req, res, next) { next() })
+		app.use(function(req, res) { res.send('route ' + req.route.path) })
+	`, "GET", "/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "route /x" {
+		t.Fatalf("body = %q, want route /x", got)
+	}
+}
+
+func TestExpressFormatCallbackReceivesNext(t *testing.T) {
+	rec, err := serveScript(t, `
+		app.get('/x', function(req, res) {
+			res.format({ 'text/plain': function(req, res, next) { next() } })
+		})
+		app.use(function(req, res) { res.send('after format') })
+	`, "GET", "/x", nil, http.Header{"Accept": {"text/plain"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.String(); got != "after format" {
+		t.Fatalf("body = %q, want after format", got)
+	}
+}

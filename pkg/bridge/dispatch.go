@@ -51,6 +51,10 @@ func (c *Chain) advance(errVal sobek.Value) sobek.Value {
 			c.skipRoute(c.current)
 			_ = c.step(sobek.Undefined())
 			return sobek.Undefined()
+		case "router":
+			c.skipRouter(c.current)
+			_ = c.step(sobek.Undefined())
+			return sobek.Undefined()
 		}
 	}
 	_ = c.step(errVal)
@@ -68,6 +72,32 @@ func (c *Chain) skipRoute(layer *router.Layer) {
 		}
 		c.index++
 	}
+}
+
+// skipRouter leaves the router that owns layer, including routers nested
+// inside it, so the chain resumes at the parent router's next layer.
+func (c *Chain) skipRouter(layer *router.Layer) {
+	if layer == nil || len(layer.RouterPath) == 0 {
+		return
+	}
+	for c.index < len(c.layers) {
+		if !routerPrefix(c.layers[c.index].RouterPath, layer.RouterPath) {
+			return
+		}
+		c.index++
+	}
+}
+
+func routerPrefix(path, prefix []*router.Table) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if path[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Chain) step(errVal sobek.Value) error {
@@ -114,10 +144,13 @@ func (c *Chain) step(errVal sobek.Value) error {
 		mark := c.nextCalls
 		c.current = layer
 		if c.req != nil {
-			route := c.p.rt.NewObject()
-			_ = route.Set("path", layer.Path)
-			_ = route.Set("method", layer.Method)
-			_ = c.req.Set("route", route)
+			_ = c.req.Set("baseUrl", layer.Base)
+			if !layer.Use && layer.Static == nil {
+				route := c.p.rt.NewObject()
+				_ = route.Set("path", layer.Path)
+				_ = route.Set("method", layer.Method)
+				_ = c.req.Set("route", route)
+			}
 		}
 		ret, err := layer.Fn(sobek.Undefined(), args...)
 		if err != nil {

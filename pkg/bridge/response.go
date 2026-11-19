@@ -355,6 +355,10 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 		if formats == nil {
 			return res
 		}
+		next := res.GetSymbol(renderNextSymbol)
+		if next == nil {
+			next = sobek.Undefined()
+		}
 		accept := p.requestHeader(req, "Accept")
 		for _, key := range formats.Keys() {
 			if accept != "" && !acceptsAny(accept, key) {
@@ -364,7 +368,7 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 			if !ok {
 				continue
 			}
-			_, _ = fn(sobek.Undefined(), req, res)
+			_, _ = fn(sobek.Undefined(), req, res, next)
 			return res
 		}
 		http.Error(w, http.StatusText(http.StatusNotAcceptable), http.StatusNotAcceptable)
