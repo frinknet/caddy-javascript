@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,10 +59,10 @@ func TestServeHTTPResponds(t *testing.T) {
 	}
 }
 
-func TestServeHTTPFallthrough(t *testing.T) {
+func TestServeHTTPContinuesWhenNoResponse(t *testing.T) {
 	dir := t.TempDir()
 	path := writeScript(t, dir, "main.js", "export default function handler(http) {}\n")
-	h := &Handler{Options: config.Options{ScriptPath: path, Fallthrough: true}}
+	h := &Handler{Options: config.Options{ScriptPath: path}}
 	if err := h.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -368,16 +369,15 @@ func TestNestedHandlerJoinsEnclosingSite(t *testing.T) {
 
 func TestServeHTTPSharesVarsAndRewriteWithNextHandler(t *testing.T) {
 	dir := t.TempDir()
-	path := writeScript(t, dir, "main.js", `route("/down/*", (http, next) => {
+	path := writeScript(t, dir, "main.js", `route("/down/*", (http) => {
 	http.vars.layer = "ran"
-	next()
 })
 export default function handler(http) {
 	http.vars.seen = "yes"
 	http.rewrite({ method: "PUT", path: "/down/changed", headers: { "x-rewritten": "1" } })
 }
 `)
-	h := &Handler{Options: config.Options{ScriptPath: path, Fallthrough: true}}
+	h := &Handler{Options: config.Options{ScriptPath: path}}
 	if err := h.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestServeHTTPBarePlaceholderWriteBack(t *testing.T) {
 	fresh = "new"
 }
 `)
-	h := &Handler{Options: config.Options{ScriptPath: path, Fallthrough: true}}
+	h := &Handler{Options: config.Options{ScriptPath: path}}
 	if err := h.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -532,5 +532,66 @@ func TestServeHTTPBarePlaceholderWriteBack(t *testing.T) {
 	}))
 	if err != nil {
 		t.Fatalf("ServeHTTP: %v", err)
+	}
+}
+
+func TestServeHTTPWritesResponse(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", `export default function handler(http) {
+	http.respond(201, {"content-type": "text/plain", "x-extra": "1"}, "created")
+}
+`)
+	h := &Handler{Options: config.Options{ScriptPath: path}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		t.Error("next handler was called")
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rec.Code)
+	}
+	if got := rec.Header().Get("content-type"); got != "text/plain" {
+		t.Errorf("content-type = %q", got)
+	}
+	if got := rec.Header().Get("x-extra"); got != "1" {
+		t.Errorf("x-extra = %q", got)
+	}
+	if got := rec.Body.String(); got != "created" {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestServeHTTPClientCancellation(t *testing.T) {
+	dir := t.TempDir()
+	path := writeScript(t, dir, "main.js", "export default function handler(http) { while (true) {} }\n")
+	h := &Handler{Options: config.Options{ScriptPath: path}}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer h.Cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(25*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	err := h.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ServeHTTP error = %v, want context.Canceled", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want no error page", rec.Body.String())
 	}
 }

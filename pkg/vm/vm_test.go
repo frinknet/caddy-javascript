@@ -204,11 +204,11 @@ func TestHandleExposesRequest(t *testing.T) {
 	const body = http.body.text()
 	http.respond(200, {
 		"x-query": http.query.q,
-		"x-header": http.headers.get("x-test"),
+		"x-header": http.headers["x-test"],
 	}, [
 		http.method, http.url, http.path, http.query.q, http.query.multi,
-		http.cookies.c, http.headers.get("x-test"), http.headers.has("x-test"),
-		http.params.x ?? "-", http.host, http.remote, http.protocol, body,
+		http.cookies.c, http.headers["x-test"], "x-test" in http.headers,
+		http.host, http.remote, http.protocol, body,
 	].join("|"))
 }
 `)
@@ -229,7 +229,7 @@ func TestHandleExposesRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	want := "POST|/echo?q=z&multi=a&multi=b|/echo|z|a,b|1|one,two|true|-|example.test|203.0.113.5:1234|HTTP/1.1|hello"
+	want := "POST|/echo?q=z&multi=a&multi=b|/echo|z|a,b|1|one,two|true|example.test|203.0.113.5:1234|HTTP/1.1|hello"
 	if got := string(resp.Body); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
@@ -244,8 +244,8 @@ func TestHandleExposesRequest(t *testing.T) {
 func TestHandleMutatesRequest(t *testing.T) {
 	dir := t.TempDir()
 	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
-	http.headers.set("x-set", "yes")
-	http.headers.delete("x-drop")
+	http.headers["x-set"] = "yes"
+	delete http.headers["x-drop"]
 	http.vars.seen = "yes"
 	http.vars.other = 2
 	http.rewrite({ method: "PUT", path: "/new", headers: { "x-rewritten": "1" } })
@@ -297,20 +297,21 @@ func TestHandleMutatesRequest(t *testing.T) {
 
 func TestHandleRouteChain(t *testing.T) {
 	dir := t.TempDir()
-	entry := writeModule(t, dir, "main.js", `route("/api/*", (http, next) => {
-	http.headers.set("x-first", "1")
-	next()
+	entry := writeModule(t, dir, "main.js", `route("/api/*", (http) => {
+	http.headers["x-first"] = "1"
 })
-route("/api/*", (http, next) => {
-	http.headers.set("x-second", "2")
-	http.next()
+route("/api/*", (http) => {
+	http.headers["x-second"] = "2"
 })
 route((http) => http.path === "/api/stop", (http) => {
 	http.respond(200, {"content-type": "text/plain"}, "stopped")
 })
+route("/api/*", (http) => {
+	http.vars.after = "ran"
+})
 export default function handler(http) {
-	const first = http.headers.get("x-first") ?? "-"
-	const second = http.headers.get("x-second") ?? "-"
+	const first = http.headers["x-first"] ?? "-"
+	const second = http.headers["x-second"] ?? "-"
 	http.respond(200, {"content-type": "text/plain"}, [http.path, first, second].join("|"))
 }
 `)
@@ -328,12 +329,19 @@ export default function handler(http) {
 		t.Errorf("body = %q", got)
 	}
 
-	resp, err = v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/api/stop", nil))
+	stopVars := map[string]any{}
+	resp, err = v.Handle(context.Background(), entry, Request{
+		Req:  httptest.NewRequest(http.MethodGet, "/api/stop", nil),
+		Vars: stopVars,
+	})
 	if err != nil {
 		t.Fatalf("Handle stop: %v", err)
 	}
 	if got := string(resp.Body); got != "stopped" {
 		t.Errorf("stop body = %q", got)
+	}
+	if _, ok := stopVars["after"]; ok {
+		t.Error("a layer after the response ran")
 	}
 
 	resp, err = v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/other", nil))
@@ -345,12 +353,16 @@ export default function handler(http) {
 	}
 }
 
-func TestRouteStopsBeforeEntry(t *testing.T) {
+func TestRouteLayersContinueAutomatically(t *testing.T) {
 	dir := t.TempDir()
-	entry := writeModule(t, dir, "main.js", `route("*", (http, next) => {})
+	entry := writeModule(t, dir, "main.js", `route("*", (http) => {
+	http.headers["x-first"] = "1"
+})
+route("*", (http) => {
+	http.headers["x-second"] = "2"
+})
 export default function handler(http) {
-	http.vars.entry = "ran"
-	http.respond(200, {}, "entry")
+	http.respond(200, {}, [http.headers["x-first"], http.headers["x-second"]].join("|"))
 }
 `)
 	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
@@ -359,16 +371,12 @@ export default function handler(http) {
 	}
 	defer v.Close()
 
-	vars := map[string]any{}
-	resp, err := v.Handle(context.Background(), entry, Request{Req: httptest.NewRequest(http.MethodGet, "/", nil), Vars: vars})
+	resp, err := v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/", nil))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if resp != nil {
-		t.Fatalf("response = %+v, want nil", resp)
-	}
-	if _, ok := vars["entry"]; ok {
-		t.Error("entry ran after a layer stopped the chain")
+	if got := string(resp.Body); got != "1|2" {
+		t.Errorf("body = %q", got)
 	}
 }
 
@@ -653,5 +661,264 @@ func TestBareGlobalsRejectFunctions(t *testing.T) {
 	}
 	if got := string(resp.Body); got != "rejected" {
 		t.Errorf("body = %q", got)
+	}
+}
+
+func TestHeaderRepeatedAndCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	const multi = http.headers["X-MULTI"]
+	const absent = http.headers["x-absent"] ?? "missing"
+	const hasDrop = "x-drop" in http.headers
+	const hasAbsent = "x-absent" in http.headers
+	http.headers["x-set"] = "yes"
+	delete http.headers["x-drop"]
+	http.respond(200, {
+		"x-multi": Array.isArray(multi) ? multi.join("+") : multi,
+		"x-absent": absent,
+		"x-has-drop": String(hasDrop),
+		"x-has-absent": String(hasAbsent),
+		"x-has-set": String("x-set" in http.headers),
+	}, "ok")
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add("x-multi", "one")
+	req.Header.Add("x-multi", "two")
+	req.Header.Set("x-drop", "gone")
+
+	resp, err := v.Handle(context.Background(), entry, Request{Req: req})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	for name, want := range map[string]string{
+		"x-multi":      "one+two",
+		"x-absent":     "missing",
+		"x-has-drop":   "true",
+		"x-has-absent": "false",
+		"x-has-set":    "true",
+	} {
+		if got := resp.Headers[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := req.Header.Get("x-set"); got != "yes" {
+		t.Errorf("request x-set = %q", got)
+	}
+	if got := req.Header.Get("x-drop"); got != "" {
+		t.Errorf("request x-drop = %q", got)
+	}
+}
+
+func TestHeaderProxy(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	const before = http.headers["x-drop"]
+	http.headers["X-Set"] = "yes"
+	http.headers["x-number"] = 7
+	const hasSet = "x-set" in http.headers
+	delete http.headers["x-drop"]
+	const hasDrop = "x-drop" in http.headers
+	const keys = Object.keys(http.headers).sort().join(",")
+	http.respond(200, {
+		"x-before": before,
+		"x-has-set": String(hasSet),
+		"x-has-drop": String(hasDrop),
+		"x-keys": keys,
+		"x-read": http.headers["x-set"] ?? "-",
+	}, "ok")
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-drop", "gone")
+	req.Header.Set("x-keep", "kept")
+
+	resp, err := v.Handle(context.Background(), entry, Request{Req: req})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	for name, want := range map[string]string{
+		"x-before":   "gone",
+		"x-has-set":  "true",
+		"x-has-drop": "false",
+		"x-keys":     "X-Keep,X-Number,X-Set",
+		"x-read":     "yes",
+	} {
+		if got := resp.Headers[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := req.Header.Get("x-set"); got != "yes" {
+		t.Errorf("request x-set = %q", got)
+	}
+	if got := req.Header.Get("x-number"); got != "7" {
+		t.Errorf("request x-number = %q", got)
+	}
+	if got := req.Header.Get("x-drop"); got != "" {
+		t.Errorf("request x-drop = %q", got)
+	}
+}
+
+func TestRespondValidation(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	let invalid = "accepted"
+	try {
+		http.respond(99, {}, "")
+	} catch (e) {
+		invalid = "rejected"
+	}
+	http.respond(201, {"x-invalid": invalid, "x-number": 7, "x-skip": null}, 42)
+	let repeat = "accepted"
+	try {
+		http.respond(202, {}, "again")
+	} catch (e) {
+		repeat = e.message
+	}
+	http.vars.repeat = repeat
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	vars := map[string]any{}
+	resp, err := v.Handle(context.Background(), entry, Request{
+		Req:  httptest.NewRequest(http.MethodGet, "/", nil),
+		Vars: vars,
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if resp.Status != 201 {
+		t.Errorf("status = %d, want 201", resp.Status)
+	}
+	if got := string(resp.Body); got != "42" {
+		t.Errorf("body = %q", got)
+	}
+	if got := resp.Headers["x-invalid"]; got != "rejected" {
+		t.Errorf("x-invalid = %q", got)
+	}
+	if got := resp.Headers["x-number"]; got != "7" {
+		t.Errorf("x-number = %q", got)
+	}
+	if _, ok := resp.Headers["x-skip"]; ok {
+		t.Error("a nil header value was sent")
+	}
+	if got, ok := vars["repeat"].(string); !ok || !strings.Contains(got, "already sent") {
+		t.Errorf("vars[repeat] = %v, want an already-sent error", vars["repeat"])
+	}
+}
+
+func TestBodyEdgeCases(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	const empty = http.body.text()
+	const again = http.body.text()
+	http.respond(200, {}, JSON.stringify([empty, again]))
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Body = nil
+
+	resp, err := v.Handle(context.Background(), entry, Request{Req: req})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := string(resp.Body); got != `["",""]` {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestBodyJSONRejectsInvalidInput(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	http.body.json()
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not json"))
+	_, err = v.Handle(context.Background(), entry, Request{Req: req})
+	if err == nil || !strings.Contains(err.Error(), "decode request body") {
+		t.Fatalf("Handle error = %v, want a decode error", err)
+	}
+}
+
+func TestBodyLimitBoundary(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	http.respond(200, {}, http.body.text())
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	resp, err := v.Handle(context.Background(), entry, Request{
+		Req:     httptest.NewRequest(http.MethodPost, "/", strings.NewReader("hello")),
+		MaxBody: 5,
+	})
+	if err != nil {
+		t.Fatalf("Handle at the limit: %v", err)
+	}
+	if got := string(resp.Body); got != "hello" {
+		t.Errorf("body = %q", got)
+	}
+
+	_, err = v.Handle(context.Background(), entry, Request{
+		Req:     httptest.NewRequest(http.MethodPost, "/", strings.NewReader("hello!")),
+		MaxBody: 5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Handle over the limit error = %v, want a body limit error", err)
+	}
+}
+
+func TestHandleClientCancellation(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	while (true) {}
+}
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(25*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	_, err = v.Handle(ctx, entry, testRequest(http.MethodGet, "/", nil))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handle error = %v, want context.Canceled", err)
 	}
 }

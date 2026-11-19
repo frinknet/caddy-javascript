@@ -5,7 +5,7 @@ configuration generation, joined by the site entry and its handle directives;
 ESM evaluation with a sandboxed loader and a provision deadline; a generation
 registry keyed by host matcher set or explicit `site`; a per-request `http`
 object with request facts, headers, a bounded body, cookies, a live vars proxy,
-`rewrite`, `respond`, and `next`; and `route()` JavaScript layers. The rest of
+`rewrite`, and `respond`; and `route()` JavaScript layers. The rest of
 this file is the target. `README.md` documents what runs today.
 
 ## 1. Vision
@@ -138,7 +138,6 @@ joins an existing site VM or creates it, so provisioning order does not matter.
 | `env_allow <names...>` | Environment names visible to the VM. |
 | `fetch_allow <hosts...>` | Outbound hosts the VM may reach. |
 | `watch [true\|false]` | Reload the site VM when the entry module tree changes. Default true. |
-| `fallthrough` | Continue the Caddy chain when the JS chain produces no response. |
 
 A negative or malformed value is a configuration error. The script file is
 resolved at provisioning time; a missing file is an error, not a runtime 404.
@@ -173,13 +172,12 @@ global object, and it is not the live Go configuration.
 
 Every request receives a fresh `http` object. It carries:
 
-- `method`, `url`, `path`, `query`, `headers`, `params`, `body`, `remote`,
+- `method`, `url`, `path`, `query`, `headers`, `body`, `remote`,
   `protocol`, `host`.
 - `vars`, a live view of the request's Caddy variable table.
 - `respond(status, headers, body)`, terminal.
 - `rewrite({method, path, headers})`, which mutates the real `*http.Request`
   (`URL.Path`, `RawPath`, `RequestURI`, headers) and continues.
-- `next()`, which advances the JavaScript chain.
 - `server`, the site's `server` object.
 - `signal`, cancelled when the client disconnects or the request deadline ends.
 
@@ -190,10 +188,15 @@ Two chains, kept separate:
 1. The Caddy middleware chain. Each `javascript` directive is one handler at the
    configured order. It either responds or calls Caddy's `next`.
 2. The VM chain. `route(matcher, fn)` registers ordered JavaScript layers.
-   `fn(http, next)` runs them. `next()` advances the VM chain.
+   `fn(http)` runs them in registration order. A layer that returns without
+   responding continues to the next layer; a response stops the chain.
 
 When the VM chain finishes without writing a response, the handler calls Caddy's
-`next` if `fallthrough` is set; otherwise it answers `404`.
+`next`. A script that wants to stop with 404 calls `http.respond(404, ...)`.
+
+Multiple `javascript` directives in one site block are ordered handlers that
+share the site VM: the first one that responds stops the Caddy chain, and one
+that returns without responding continues to the next directive.
 
 - `route(matcher, fn)` is module-scope registration only.
 - `http.respond()` and `http.rewrite()` are per-request actions only.
@@ -203,18 +206,18 @@ When the VM chain finishes without writing a response, the handler calls Caddy's
   Caddy route match, because route selection already happened.
 - The site handler is ordered before `file_server` and after `encode` and
   `templates` so that JavaScript output flows back through compression and
-  templating, and so that a fallthrough can reach the file server.
+  templating, and so that an unanswered request can reach the file server.
 
 ### 4.4 Request and response helpers
 
-The runtime provides a small, browser-shaped surface, not Express:
+The runtime provides a small, Caddy-shaped surface, not Express:
 
-- `http.headers.get/set/has/delete`
+- `http.headers`, a live proxy: `http.headers["name"]`, assignment, `delete`,
+  and `in` read and mutate the request; there are no method forms
 - `http.body.text/json/bytes`, bounded by `max_body`
 - `http.cookies`
 - `http.respond()` with status, headers, and string, bytes, or JSON body
 - `http.rewrite()`
-- `http.next()`
 - `http.signal`
 
 There is no `res.status().json()`, no `app.use`, no `req.param`, and no view
@@ -392,7 +395,8 @@ Therefore:
   - state persists across requests in one site;
   - two sites do not share state;
   - a reload rebuilds VMs and drops state;
-  - `route`, `respond`, `rewrite`, `next`, and `fallthrough` ordering;
+  - `route`, `respond`, and `rewrite` ordering, including a
+    multi-directive chain;
   - `http.vars` visibility in downstream templates;
   - worker messages, ports, and teardown;
   - `server` draft mutation and `server.apply()` failure and success;
@@ -417,7 +421,7 @@ Substring checks are not a substitute for exact bytes.
 The configuration surface, one go-quickjs VM per site per generation, ESM
 evaluation with a sandboxed loader, a per-request `http` (request facts,
 `headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
-`respond`, and `next`), `route()` layers, timeouts, memory limits, queue
+and `respond`), `route()` layers, timeouts, memory limits, queue
 admission, and VM cleanup on reload are implemented. Workers and messages, the
 mutable `server` draft, `_`, events, fetch, `fs`, `env_allow`, and watching
 remain.

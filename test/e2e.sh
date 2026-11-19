@@ -61,9 +61,7 @@ http://shared.example:80 {
 		javascript /app/surface.js
 	}
 	handle /files/* {
-		javascript /app/surface-rewrite.js {
-			fallthrough
-		}
+		javascript /app/surface-rewrite.js
 		file_server {
 			root /app
 		}
@@ -77,14 +75,17 @@ http://vars.example:80 {
 	}
 	vars from_caddy mapped
 	handle {
-		javascript /app/vars.js {
-			fallthrough
-		}
+		javascript /app/vars.js
 		templates
 		file_server {
 			root /app
 		}
 	}
+}
+
+http://chain.example:80 {
+	javascript /app/chain-auth.js
+	javascript /app/chain-site.js
 }
 CADDY
 
@@ -250,6 +251,9 @@ check "http exposes query and cookies, and skips unmatched layers" GET /surface/
 check "rewrite changes the path a later Caddy handler sees" GET /files/anything --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
 
 check "bare globals and http.vars stay separate" GET /vars/page.html --host vars.example --status 200 --equals 'site=vars.example! host=vars.example caddy=mapped bare_site=vars.example! bare_fresh=new vars_explicit=new vars_fresh=[]'
+
+check "a javascript directive that responds stops the chain" GET "/chain?token=no" --host chain.example --status 401 --equals 'unauthorized'
+check "an unanswered javascript directive continues to the next one" GET "/chain?token=secret" --host chain.example --status 200 --equals 'token=secret'
 
 echo ""
 echo "=== Test 2: configuration validation ==="

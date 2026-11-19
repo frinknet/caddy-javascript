@@ -27,9 +27,9 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
 - ESM imports resolve inside `root`. Bare specifiers, npm, CommonJS, and paths
   outside the root are rejected.
 - Each request gets a fresh `http` object with `method`, `url`, `path`,
-  `query`, `params`, `headers` (`get`/`set`/`has`/`delete`), `cookies`, `body`
+  `query`, `headers`, `cookies`, `body`
   (`text`/`json`/`bytes`, bounded at 1 MiB), `host`, `remote`, `protocol`,
-  `vars`, `rewrite`, `respond`, and `next`.
+  `vars`, `rewrite`, and `respond`.
 - During a dispatch the global space is the request's Caddy placeholder space.
   Reading a bare identifier resolves a `map` destination or any other
   placeholder (`site`, `host`, `method`, `path`); it never reads a variable.
@@ -47,19 +47,27 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
   map-valued var is one key. `http.vars.user.name` works in JavaScript, but a
   template reads the whole value with
   `{{placeholder "http.vars.user"}}`; there is no child placeholder.
+- `http.headers` is a live `Proxy` over the request's headers. Read with
+  `http.headers["x-app"]`, set with `http.headers["x-app"] = "caddy"`, and
+  remove with `delete http.headers["x-app"]`; `"x-app" in http.headers`
+  reports presence and `Object.keys` lists the names. Header names are
+  case-insensitive, and repeated request headers read as an array.
 - `http.rewrite({method, path, headers})` mutates the real request for
   downstream Caddy handlers. Fields on `http` are a snapshot taken at dispatch,
   so a rewrite does not change the current `http.path`.
 - `route(matcher, fn)` registers module-scope JavaScript layers. They run in
-  registration order before the module's default export, and a layer calls
-  `next()` (or `http.next()`) to continue. A layer that returns without calling
-  `next()` stops the chain, so the default export does not run. A string
+  registration order before the module's default export. A layer that returns
+  without responding continues to the next matching layer; a layer that
+  responds stops the chain, so the default export does not run. A string
   matcher matches a path exactly, or a prefix when it ends in `*`; a function
-  matcher receives `http`. `params` is reserved for Caddy path captures and is
-  empty today.
+  matcher receives `http`.
 - `respond` writes the status, headers, and body. A handler that returns without
-  responding answers `404`, or calls the next Caddy handler when `fallthrough`
-  is set.
+  responding calls the next Caddy handler; use `respond(404, ...)` to answer
+  404 explicitly.
+- Multiple `javascript` directives in one site block form an ordered chain and
+  share the site VM. Each module's default export runs at its directive
+  position; a handler that responds stops the chain, and one that returns
+  without responding continues to the next directive.
 - Reading `http.body` consumes the request stream, so a later Caddy handler sees
   an empty body.
 - `timeout` interrupts a runaway handler and answers `504`. A full per-VM queue
@@ -70,7 +78,7 @@ its helpers, and `route()` registers JavaScript layers. Workers, messaging,
   previous generation keeps serving.
 
 Parsed but not active yet: `env_allow`, `fetch_allow`, and `watch`.
-`site`, `root`, `timeout`, `memory`, `queue_size`, and `fallthrough` are active.
+`site`, `root`, `timeout`, `memory`, and `queue_size` are active.
 
 ## Caddyfile
 
@@ -104,7 +112,6 @@ Options are available on both the global option and the directive:
 | `env_allow <names...>` | Environment allowlist. Parsed, not active yet. | empty |
 | `fetch_allow <hosts...>` | Outbound host allowlist. Parsed, not active yet. | empty |
 | `watch [true\|false]` | Reload on module-tree changes. Parsed, not active yet. | `true` |
-| `fallthrough` | Continue the Caddy chain when the handler has no response. | off |
 
 ```caddyfile
 example.com {
@@ -113,7 +120,6 @@ example.com {
 		timeout     2s
 		memory      67108864
 		queue_size  8
-		fallthrough
 	}
 }
 ```
@@ -123,9 +129,8 @@ example.com {
 ```js
 import { label } from "./lib.js"
 
-route("/api/*", (http, next) => {
-	http.headers.set("x-app", "caddy")
-	next()
+route("/api/*", (http) => {
+	http.headers["x-app"] = "caddy"
 })
 
 export default function handler(http) {
@@ -144,8 +149,7 @@ the dispatch has returned gets an error. `server`, `_`, `fetch`, `fs`, workers,
 
 The app ID is `javascript`. The handler ID is `http.handlers.javascript`.
 Options use the same names as the Caddyfile (`script_path`, `site`, `root`,
-`timeout`, `memory`, `queue_size`, `env_allow`, `fetch_allow`, `watch`,
-`fallthrough`).
+`timeout`, `memory`, `queue_size`, `env_allow`, `fetch_allow`, `watch`).
 
 ## Build and test
 

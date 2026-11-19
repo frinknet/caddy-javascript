@@ -52,47 +52,29 @@ func normalizeMatcher(matcher quickjs.Value) (any, error) {
 	}
 }
 
-// runChain executes the layers registered for one module. It reports whether a
-// layer stopped the chain without calling next, so the entry module does not
-// run after it.
-func (v *VM) runChain(ctx context.Context, st *requestState, http quickjs.Value, layers []layer, index int) (bool, error) {
-	if st.resp.responded() {
-		return true, nil
-	}
-	if index >= len(layers) {
-		return false, nil
-	}
-
-	matches, err := matchLayer(ctx, st, layers[index].matcher, http)
-	if err != nil {
-		return true, err
-	}
-	if !matches {
-		return v.runChain(ctx, st, http, layers, index+1)
-	}
-
-	advanced := false
-	stopped := false
-	next := func() error {
-		if advanced {
-			return errors.New("javascript: next() already called")
+// runChain executes the layers registered for one module in registration
+// order. A layer that returns without responding continues to the next layer;
+// a response stops the chain so the entry module does not run. It reports
+// whether the chain produced a response.
+func (v *VM) runChain(ctx context.Context, st *requestState, http quickjs.Value, layers []layer) (bool, error) {
+	for _, l := range layers {
+		if st.resp.responded() {
+			return true, nil
 		}
-		advanced = true
-		var err error
-		stopped, err = v.runChain(ctx, st, http, layers, index+1)
-		return err
-	}
-	if err := http.Set("next", next); err != nil {
-		return true, err
-	}
 
-	if _, err := layers[index].fn.CallContext(ctx, http, next); err != nil {
-		return true, err
+		matches, err := matchLayer(ctx, st, l.matcher, http)
+		if err != nil {
+			return true, err
+		}
+		if !matches {
+			continue
+		}
+
+		if _, err := l.fn.CallContext(ctx, http); err != nil {
+			return true, err
+		}
 	}
-	if st.resp.responded() || !advanced {
-		return true, nil
-	}
-	return stopped, nil
+	return st.resp.responded(), nil
 }
 
 func matchLayer(ctx context.Context, st *requestState, matcher any, http quickjs.Value) (bool, error) {

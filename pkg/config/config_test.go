@@ -27,7 +27,6 @@ func TestParseFull(t *testing.T) {
 		env_allow HOME E2E_SECRET
 		fetch_allow 127.0.0.1 example.test
 		watch false
-		fallthrough
 	}`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -58,9 +57,6 @@ func TestParseFull(t *testing.T) {
 	}
 	if o.Watching() {
 		t.Error("Watching() = true, want false")
-	}
-	if !o.Fallthrough {
-		t.Error("Fallthrough = false, want true")
 	}
 }
 
@@ -121,6 +117,9 @@ func TestParseErrors(t *testing.T) {
 		{"empty fetch", `javascript /a.js {
 			fetch_allow
 		}`, "missing value"},
+		{"removed fallthrough", `javascript /a.js {
+			fallthrough
+		}`, "unrecognized option"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

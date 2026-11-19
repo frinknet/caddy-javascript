@@ -181,7 +181,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		Lookup: lookup,
 		Set:    setVar,
 		Delete: deleteVar,
-		Params: map[string]string{},
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
@@ -206,11 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 
 	if resp == nil {
-		if h.Fallthrough {
-			return next.ServeHTTP(w, r)
-		}
-		http.NotFound(w, r)
-		return nil
+		return next.ServeHTTP(w, r)
 	}
 
 	for key, value := range resp.Headers {

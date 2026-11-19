@@ -51,7 +51,6 @@ type Request struct {
 	Lookup  func(name string) (any, bool)
 	Set     func(name string, value any)
 	Delete  func(name string)
-	Params  map[string]string
 	MaxBody int64
 }
 
@@ -74,6 +73,7 @@ type VM struct {
 
 	currentScript string
 	varsFactory   quickjs.Value
+	headerFactory quickjs.Value
 	active        *requestState
 
 	slots  chan struct{}
@@ -184,6 +184,12 @@ func New(cfg Config) (*VM, error) {
 		return nil, fmt.Errorf("javascript: install runtime bridge: %w", err)
 	}
 	v.varsFactory = factory
+	headerFactory, err := rt.Eval(headersFactorySource)
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install headers bridge: %w", err)
+	}
+	v.headerFactory = headerFactory
 	proto, err := rt.Eval("Object.getPrototypeOf(globalThis)")
 	if err != nil {
 		v.cleanupNew()
@@ -284,9 +290,9 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 
 		httpObj, err := v.newHTTP(ctx, st, resp)
 		if err == nil {
-			var stopped bool
-			stopped, err = v.runChain(ctx, st, httpObj, layers, 0)
-			if err == nil && !stopped && !resp.responded() {
+			var responded bool
+			responded, err = v.runChain(ctx, st, httpObj, layers)
+			if err == nil && !responded && !resp.responded() {
 				_, err = entry.CallContext(ctx, httpObj)
 			}
 		}
@@ -585,9 +591,8 @@ func (s *sandbox) read(name string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// headerValue renders a JavaScript header value. An array, which a script gets
-// from headers.get() when a request carries repeated headers, joins the way
-// HTTP repeats a field.
+// headerValue renders a JavaScript header value. An array, which a script reads
+// when a request carries repeated headers, joins the way HTTP repeats a field.
 func headerValue(value any) string {
 	switch v := value.(type) {
 	case []string:

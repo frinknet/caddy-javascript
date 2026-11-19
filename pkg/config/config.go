@@ -16,16 +16,15 @@ const (
 )
 
 type Options struct {
-	ScriptPath  string         `json:"script_path,omitempty"`
-	Site        string         `json:"site,omitempty"`
-	RootDir     string         `json:"root,omitempty"`
-	Timeout     caddy.Duration `json:"timeout,omitempty"`
-	Memory      int64          `json:"memory,omitempty"`
-	QueueSize   int            `json:"queue_size,omitempty"`
-	EnvAllow    []string       `json:"env_allow,omitempty"`
-	FetchAllow  []string       `json:"fetch_allow,omitempty"`
-	Watch       *bool          `json:"watch,omitempty"`
-	Fallthrough bool           `json:"fallthrough,omitempty"`
+	ScriptPath string         `json:"script_path,omitempty"`
+	Site       string         `json:"site,omitempty"`
+	RootDir    string         `json:"root,omitempty"`
+	Timeout    caddy.Duration `json:"timeout,omitempty"`
+	Memory     int64          `json:"memory,omitempty"`
+	QueueSize  int            `json:"queue_size,omitempty"`
+	EnvAllow   []string       `json:"env_allow,omitempty"`
+	FetchAllow []string       `json:"fetch_allow,omitempty"`
+	Watch      *bool          `json:"watch,omitempty"`
 }
 
 func (o *Options) ApplyDefaults() {
@@ -137,8 +136,6 @@ func FromDispenser(d *caddyfile.Dispenser, o *Options) error {
 				on := true
 				o.Watch = &on
 			}
-		case "fallthrough":
-			o.Fallthrough = true
 		default:
 			return fmt.Errorf("javascript: unrecognized option %q", d.Val())
 		}

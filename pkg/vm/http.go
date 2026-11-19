@@ -73,6 +73,35 @@ const varsFactorySource = `(function (get, set, has, del, keys) {
 	})
 })`
 
+// headersFactorySource wraps the request headers in a Proxy, so a script reads
+// and writes them as ordinary properties.
+const headersFactorySource = `(function (get, set, has, del, keys) {
+	return new Proxy(Object.create(null), {
+		get(target, key) {
+			if (typeof key !== "string" || !has(key)) return undefined
+			return get(key)
+		},
+		set(target, key, value) {
+			if (typeof key === "string") set(key, String(value))
+			return true
+		},
+		has(target, key) {
+			return typeof key === "string" && has(key)
+		},
+		deleteProperty(target, key) {
+			if (typeof key === "string") del(key)
+			return true
+		},
+		ownKeys() {
+			return keys()
+		},
+		getOwnPropertyDescriptor(target, key) {
+			if (typeof key !== "string" || !has(key)) return undefined
+			return { value: get(key), enumerable: true, configurable: true, writable: true }
+		},
+	})
+})`
+
 // requestState is the Go side of one http object. The VM goroutine owns it for
 // the duration of a dispatch; anything a script reaches after the dispatch has
 // returned is refused instead of racing the request goroutine.
@@ -84,7 +113,6 @@ type requestState struct {
 	lookup   func(name string) (any, bool)
 	set      func(name string, value any)
 	delete   func(name string)
-	params   map[string]string
 	maxBody  int64
 	body     []byte
 	bodyRead bool
@@ -100,10 +128,6 @@ func newRequestState(req Request, resp *response) (*requestState, error) {
 	if vars == nil {
 		vars = make(map[string]any)
 	}
-	params := req.Params
-	if params == nil {
-		params = make(map[string]string)
-	}
 	maxBody := req.MaxBody
 	if maxBody <= 0 {
 		maxBody = DefaultMaxBody
@@ -115,7 +139,6 @@ func newRequestState(req Request, resp *response) (*requestState, error) {
 		lookup:  req.Lookup,
 		set:     req.Set,
 		delete:  req.Delete,
-		params:  params,
 		maxBody: maxBody,
 	}, nil
 }
@@ -247,6 +270,20 @@ func (s *requestState) headerDelete(name string) error {
 	}
 	s.req.Header.Del(name)
 	return nil
+}
+
+func (s *requestState) headerKeys() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkLocked(); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(s.req.Header))
+	for name := range s.req.Header {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 func (s *requestState) rewrite(fields any) error {
@@ -413,16 +450,9 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 		cookies[cookie.Name] = cookie.Value
 	}
 
-	headers := v.rt.NewObject()
-	for name, fn := range map[string]any{
-		"get":    st.headerGet,
-		"set":    st.headerSet,
-		"has":    st.headerHas,
-		"delete": st.headerDelete,
-	} {
-		if err := headers.Set(name, fn); err != nil {
-			return quickjs.Value{}, err
-		}
+	headers, err := v.newHeaders(ctx, st)
+	if err != nil {
+		return quickjs.Value{}, err
 	}
 
 	body := v.rt.NewObject()
@@ -442,7 +472,6 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 		"url":      st.req.URL.String(),
 		"path":     st.req.URL.Path,
 		"query":    query,
-		"params":   st.params,
 		"cookies":  cookies,
 		"host":     st.req.Host,
 		"remote":   st.req.RemoteAddr,
@@ -451,7 +480,6 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 		"body":     body,
 		"respond":  resp.respond,
 		"rewrite":  st.rewrite,
-		"next":     func() error { return nil },
 	} {
 		if err := obj.Set(name, value); err != nil {
 			return quickjs.Value{}, err
@@ -475,5 +503,15 @@ func (v *VM) newVars(ctx context.Context, st *requestState) (quickjs.Value, erro
 		st.varHas,
 		st.varDelete,
 		st.varKeys,
+	)
+}
+
+func (v *VM) newHeaders(ctx context.Context, st *requestState) (quickjs.Value, error) {
+	return v.headerFactory.CallContext(ctx,
+		st.headerGet,
+		st.headerSet,
+		st.headerHas,
+		st.headerDelete,
+		st.headerKeys,
 	)
 }
