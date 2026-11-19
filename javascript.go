@@ -199,12 +199,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			)
 			http.Error(w, http.StatusText(http.StatusGatewayTimeout), http.StatusGatewayTimeout)
 		} else if err := ex.Err(); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, bridge.ErrQueueFull) {
+				status = http.StatusServiceUnavailable
+			}
 			h.logger.Error("javascript: handler error",
 				zap.Error(err),
 				zap.String("method", rc.Method),
 				zap.String("path", rc.Path),
 			)
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			http.Error(w, http.StatusText(status), status)
 		} else {
 			http.Error(w, "Not Found", http.StatusNotFound)
 		}

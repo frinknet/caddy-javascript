@@ -6,6 +6,8 @@ import (
 
 	"github.com/grafana/sobek"
 	"go.uber.org/zap"
+
+	"github.com/frinknet/caddy-javascript/pkg/metric"
 )
 
 // jsTimer is a cancellable timer owned by the program. A timer holds one
@@ -109,6 +111,8 @@ func (p *Program) submitAs(ex *Exchange, fn func()) bool {
 	if p.sched.Submit(run) {
 		return true
 	}
+	metric.QueueFull.Inc()
+	p.failAsync(ex, ErrQueueFull)
 	if p.logger != nil {
 		p.logger.Warn("javascript: event queue full, dropping timer callback")
 	}

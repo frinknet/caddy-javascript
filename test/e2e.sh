@@ -350,6 +350,7 @@ check "fetch sends method, headers, and body" GET /fetch/post --status 200 --con
 check "fetch streams the response body" GET /fetch/stream --status 200 --equals 'hello world'
 check "fetch rejects a blocked host" GET /fetch/reject --status 502 --contains 'not in fetch_allow'
 check "callback fetch rejects a blocked host" GET /fetch-blocked --status 403 --equals blocked
+check "callback fetch reports a failure code" GET /fetch-blocked-code --status 403 --equals 'ERR_FETCH_FAILED'
 
 # ── Test 6: modules, fs, path, timers ──────────────────
 echo ""
@@ -363,6 +364,7 @@ check "fs.readFileSync reads what was written" GET /fs/read-written --status 200
 check "absolute-looking paths resolve inside the root" GET /fs/absolute --status 200 --equals 'static hello'
 check "parent segments are clamped to the root" GET /fs/clamp --status 200 --equals 'static hello'
 check "a missing fs file reports an error" GET /fs/missing --status 500 --contains 'no such file'
+check "a missing fs file reports an ENOENT code" GET /fs/missing-code --status 500 --equals 'ENOENT'
 check "path.join uses POSIX semantics" GET /path/join --status 200 --equals 'a/c'
 check "core shims work together" GET /shims --status 200 --ctype application/json --contains '"buffer":"hi"' --contains '"host":"example.com"' --contains '"query":"x=1&y=2"' --contains '"format":"v-2"' --contains '"events":"ok"'
 check "setTimeout completes the response" GET /timer --status 200 --equals 'timer fired'

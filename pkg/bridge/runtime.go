@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/frinknet/caddy-javascript/pkg/files"
+	"github.com/frinknet/caddy-javascript/pkg/metric"
 	"github.com/frinknet/caddy-javascript/pkg/router"
 )
 
@@ -18,13 +20,16 @@ type Scheduler interface {
 	Submit(func()) bool
 }
 
+const DefaultIOConcurrency = 64
+
 type Config struct {
-	Timeout     time.Duration
-	EnvAllow    []string
-	FetchAllow  []string
-	MaxBody     int64
-	AsyncBudget int
-	Quit        <-chan struct{}
+	Timeout       time.Duration
+	EnvAllow      []string
+	FetchAllow    []string
+	MaxBody       int64
+	AsyncBudget   int
+	IOConcurrency int
+	Quit          <-chan struct{}
 }
 
 type Program struct {
@@ -40,6 +45,11 @@ type Program struct {
 	timersMu    sync.Mutex
 	timers      map[int64]*jsTimer
 	nextTimerID int64
+
+	ioLimit  int
+	ioMu     sync.Mutex
+	ioActive int
+	ioQueue  []func()
 
 	fsObj          *sobek.Object
 	pathObj        *sobek.Object
@@ -68,6 +78,9 @@ func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger)
 	if cfg.AsyncBudget <= 0 {
 		cfg.AsyncBudget = 64
 	}
+	if cfg.IOConcurrency <= 0 {
+		cfg.IOConcurrency = DefaultIOConcurrency
+	}
 	p := &Program{
 		rt:       sobek.New(),
 		routes:   router.New(),
@@ -75,6 +88,7 @@ func NewProgram(cfg Config, fsys *files.FS, sched Scheduler, logger *zap.Logger)
 		sched:    sched,
 		logger:   logger,
 		cfg:      cfg,
+		ioLimit:  cfg.IOConcurrency,
 		timers:   make(map[int64]*jsTimer),
 		modules:  make(map[string]*moduleRecord),
 		routers:  make(map[*sobek.Object]*router.Table),
@@ -304,10 +318,101 @@ func (p *Program) submitAsync(ex *Exchange, fn func()) {
 	if p.sched.Submit(run) {
 		return
 	}
+	metric.QueueFull.Inc()
+	p.failAsync(ex, ErrQueueFull)
 	if ex != nil {
 		ex.pendingDone()
 	}
 	if p.logger != nil {
 		p.logger.Warn("javascript: event queue full, dropping async callback")
+	}
+}
+
+// ErrQueueFull is recorded on an exchange whose callback could not be queued.
+// The request answers 503 instead of waiting for a response that will never
+// arrive.
+var ErrQueueFull = errors.New("javascript: event queue full")
+
+// failAsync abandons the outstanding work of an exchange after a callback was
+// dropped, so the handler stops waiting and reports the failure to the client.
+func (p *Program) failAsync(ex *Exchange, err error) {
+	if ex == nil {
+		return
+	}
+	if ex.Err() == nil {
+		ex.SetError(err)
+	}
+	p.cancelTimers(ex)
+}
+
+// goIO runs fn off the event loop while keeping the number of concurrently
+// running I/O goroutines bounded. Work over the limit waits for a running slot
+// instead of spawning another goroutine.
+func (p *Program) goIO(fn func()) {
+	p.ioMu.Lock()
+	if p.ioActive < p.ioLimit {
+		p.ioActive++
+		p.ioMu.Unlock()
+		go p.runIO(fn)
+		return
+	}
+	p.ioQueue = append(p.ioQueue, fn)
+	p.ioMu.Unlock()
+}
+
+func (p *Program) runIO(fn func()) {
+	defer func() {
+		p.ioMu.Lock()
+		if len(p.ioQueue) > 0 {
+			next := p.ioQueue[0]
+			p.ioQueue = p.ioQueue[1:]
+			p.ioMu.Unlock()
+			go p.runIO(next)
+			return
+		}
+		p.ioActive--
+		p.ioMu.Unlock()
+	}()
+	fn()
+}
+
+// newFSError builds the Error object an fs callback receives. Node callers
+// inspect err.message and err.code, so both are always present.
+func (p *Program) newFSError(err error) *sobek.Object {
+	obj := p.rt.NewGoError(err)
+	_ = obj.Set("name", "Error")
+	_ = obj.Set("code", fsErrorCode(err))
+	return obj
+}
+
+func fsErrorCode(err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "ENOENT"
+	case errors.Is(err, os.ErrPermission):
+		return "EACCES"
+	case errors.Is(err, os.ErrExist):
+		return "EEXIST"
+	default:
+		return "EIO"
+	}
+}
+
+// newFetchError builds the Error object a fetch callback receives.
+func (p *Program) newFetchError(err error) *sobek.Object {
+	obj := p.rt.NewGoError(err)
+	_ = obj.Set("name", "Error")
+	_ = obj.Set("code", fetchErrorCode(err))
+	return obj
+}
+
+func fetchErrorCode(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "ABORT_ERR"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "ETIMEDOUT"
+	default:
+		return "ERR_FETCH_FAILED"
 	}
 }

@@ -309,7 +309,7 @@ func TestFetchBlockedHostReportsToCallback(t *testing.T) {
 	script := `
 		app.get('/x', function(req, res) {
 			fetch('http://example.invalid/', function(err) {
-				if (err) { res.status(502).send(err); return }
+				if (err) { res.status(502).send(err.message); return }
 				res.send('allowed')
 			})
 		})

@@ -22,7 +22,7 @@ var (
 		Namespace: "caddy",
 		Subsystem: "javascript",
 		Name:      "queue_full_total",
-		Help:      "Total requests rejected because the event queue was full.",
+		Help:      "Total requests and callbacks rejected or dropped because the event queue was full.",
 	})
 
 	Reloads = prometheus.NewCounter(prometheus.CounterOpts{

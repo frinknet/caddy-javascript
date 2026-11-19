@@ -239,12 +239,12 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 			ex, terr := p.trackAsync()
 			if terr != nil {
 				p.submitAsync(nil, func() {
-					_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+					_, _ = cb(sobek.Undefined(), p.newFetchError(err), sobek.Null())
 				})
 				return sobek.Undefined()
 			}
 			p.submitAsync(ex, func() {
-				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+				_, _ = cb(sobek.Undefined(), p.newFetchError(err), sobek.Null())
 			})
 			return sobek.Undefined()
 		}
@@ -303,14 +303,14 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 	if terr != nil {
 		if hasCallback {
 			p.submitAsync(nil, func() {
-				_, _ = cb(sobek.Undefined(), p.rt.ToValue(terr.Error()), sobek.Null())
+				_, _ = cb(sobek.Undefined(), p.newFetchError(terr), sobek.Null())
 			})
 			return sobek.Undefined()
 		}
 		_ = reject(p.rt.NewGoError(terr))
 		return p.rt.ToValue(promise)
 	}
-	go func() {
+	p.goIO(func() {
 		resp, err := client.Do(req)
 		if err != nil {
 			cancel()
@@ -325,7 +325,7 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 					return
 				}
 				if hasCallback {
-					_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+					_, _ = cb(sobek.Undefined(), p.newFetchError(err), sobek.Null())
 					return
 				}
 				_ = reject(p.rt.NewGoError(err))
@@ -346,7 +346,7 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 					return
 				}
 				if readErr != nil {
-					_, _ = cb(sobek.Undefined(), p.rt.ToValue(readErr.Error()), sobek.Null())
+					_, _ = cb(sobek.Undefined(), p.newFetchError(readErr), sobek.Null())
 					return
 				}
 				_, _ = cb(sobek.Undefined(), sobek.Null(), p.buildLegacyResponse(resp, rawURL, string(data)))
@@ -362,7 +362,7 @@ func (p *Program) startFetch(client *http.Client, call sobek.FunctionCall) sobek
 			}
 			_ = resolve(p.buildFetchResponse(resp, body))
 		})
-	}()
+	})
 
 	if hasCallback {
 		return sobek.Undefined()
@@ -727,7 +727,7 @@ func (b *fetchBody) startRead(req fetchRead) {
 		_ = req.reject(b.p.rt.NewGoError(terr))
 		return
 	}
-	go func() {
+	b.p.goIO(func() {
 		buf := make([]byte, fetchChunkSize)
 		n, err := b.src.Read(buf)
 		b.p.submitAsync(ex, func() {
@@ -759,7 +759,7 @@ func (b *fetchBody) startRead(req fetchRead) {
 				b.startRead(req)
 			}
 		})
-	}()
+	})
 }
 
 func (b *fetchBody) result(data []byte, done bool) sobek.Value {
@@ -787,7 +787,7 @@ func (b *fetchBody) text() sobek.Value {
 		_ = reject(b.p.rt.NewGoError(terr))
 		return b.p.rt.ToValue(promise)
 	}
-	go func() {
+	b.p.goIO(func() {
 		data, err := io.ReadAll(io.LimitReader(b.src, maxFetchBytes+1))
 		b.close()
 		b.p.submitAsync(ex, func() {
@@ -805,7 +805,7 @@ func (b *fetchBody) text() sobek.Value {
 			}
 			_ = resolve(b.p.rt.ToValue(string(data)))
 		})
-	}()
+	})
 	return b.p.rt.ToValue(promise)
 }
 
@@ -823,7 +823,7 @@ func (b *fetchBody) arrayBuffer() sobek.Value {
 		_ = reject(b.p.rt.NewGoError(terr))
 		return b.p.rt.ToValue(promise)
 	}
-	go func() {
+	b.p.goIO(func() {
 		data, err := io.ReadAll(io.LimitReader(b.src, maxFetchBytes+1))
 		b.close()
 		b.p.submitAsync(ex, func() {
@@ -841,7 +841,7 @@ func (b *fetchBody) arrayBuffer() sobek.Value {
 			}
 			_ = resolve(b.p.rt.ToValue(b.p.rt.NewArrayBuffer(data)))
 		})
-	}()
+	})
 	return b.p.rt.ToValue(promise)
 }
 

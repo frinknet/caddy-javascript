@@ -81,20 +81,20 @@ func (p *Program) registerFS() {
 		ex, err := p.trackAsync()
 		if err != nil {
 			p.submitAsync(nil, func() {
-				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+				_, _ = cb(sobek.Undefined(), p.newFSError(err), sobek.Null())
 			})
 			return sobek.Undefined()
 		}
-		go func() {
+		p.goIO(func() {
 			data, err := p.fs.ReadFile(name)
 			p.submitAsync(ex, func() {
 				if err != nil {
-					_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()), sobek.Null())
+					_, _ = cb(sobek.Undefined(), p.newFSError(err), sobek.Null())
 					return
 				}
 				_, _ = cb(sobek.Undefined(), sobek.Null(), p.rt.ToValue(string(data)))
 			})
-		}()
+		})
 		return sobek.Undefined()
 	})
 
@@ -109,20 +109,20 @@ func (p *Program) registerFS() {
 		ex, err := p.trackAsync()
 		if err != nil {
 			p.submitAsync(nil, func() {
-				_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()))
+				_, _ = cb(sobek.Undefined(), p.newFSError(err))
 			})
 			return sobek.Undefined()
 		}
-		go func() {
+		p.goIO(func() {
 			err := p.fs.WriteFile(name, []byte(content), 0o644)
 			p.submitAsync(ex, func() {
 				if err != nil {
-					_, _ = cb(sobek.Undefined(), p.rt.ToValue(err.Error()))
+					_, _ = cb(sobek.Undefined(), p.newFSError(err))
 					return
 				}
 				_, _ = cb(sobek.Undefined(), sobek.Null())
 			})
-		}()
+		})
 		return sobek.Undefined()
 	})
 

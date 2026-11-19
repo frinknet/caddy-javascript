@@ -617,7 +617,9 @@ Behavior and limits:
 - Redirects are re-checked against the same rules, up to 5 hops.
 - The timeout is 10s for the whole exchange, including streaming, and the
   response body is capped at 1 MiB.
-- The Promise rejects with an `Error`; the callback's `err` remains a string.
+- The Promise rejects with an `Error`; the callback's `err` is also an
+  `Error`, with `message` and a `code` such as `ERR_FETCH_FAILED`, `ABORT_ERR`,
+  or `ETIMEDOUT`.
 - `AbortController` and `AbortSignal` cancel an in-flight request. The signal
   rejects the Promise or calls the callback with an abort error.
 - `redirect` `error` rejects on a redirect; `manual` resolves with the 3xx
@@ -633,8 +635,8 @@ Behavior and limits:
 |---|---|
 | `fs.readFileSync(path)` | Return the file as a string, or throw. |
 | `fs.writeFileSync(path, data)` | Write a string with mode `0644`, or throw. |
-| `fs.readFile(path, cb)` | Call `cb(err, data)` on the event loop. `err` is a string or `null`. |
-| `fs.writeFile(path, data, cb)` | Call `cb(err)` on the event loop. `err` is a string or `null`. |
+| `fs.readFile(path, cb)` | Call `cb(err, data)` on the event loop. `err` is an `Error` with `message` and a `code` such as `ENOENT`, or `null`. |
+| `fs.writeFile(path, data, cb)` | Call `cb(err)` on the event loop. `err` is an `Error` with `message` and a `code`, or `null`. |
 
 Paths are confined to `root` using `os.Root`, which blocks `..` traversal and
 symlink escapes. Both relative and absolute-looking names are resolved inside
@@ -761,12 +763,17 @@ All requests and async callbacks share one bounded queue per directive
 instance. When the queue is full:
 
 - new requests get `503 Service Unavailable`.
-- async callbacks are dropped and logged, which can leave a response
-  unfinished.
+- async callbacks are dropped and logged. The exchange records the failure, so
+  a request that has not written a response yet also gets
+  `503 Service Unavailable` instead of hanging.
 
 Raise `queue_size` to absorb bursts, or make handlers cheaper. Requests are
 serialized: JavaScript never runs concurrently within one instance, so a slow
 handler delays the ones behind it.
+
+Work outside the event loop is bounded separately: filesystem reads and writes,
+`fetch` requests, and static file reads run in at most 64 goroutines per
+instance. Work over that limit waits for a slot.
 
 ### Shutdown
 
@@ -779,8 +786,9 @@ once it starts stopping:
   submissions.
 - Async callbacks that land during the drain, from a pending `fetch`, `fs`, or
   timer, are dropped and logged as
-  `javascript: event queue full, dropping async callback`. A response waiting on
-  one of them is left unfinished; Caddy is shutting down anyway.
+  `javascript: event queue full, dropping async callback`. If the response is
+  still unwritten, the exchange fails and the client gets `503 Service
+  Unavailable` when possible; Caddy is shutting down anyway.
 - Work still in flight outside the loop, such as an `os.Root` read or an
   outbound `fetch`, is abandoned when the drain deadline passes. Its callback
   arrives after the loop has stopped, so it is dropped.
@@ -876,7 +884,7 @@ Caddy's Prometheus endpoint exposes:
 |---|---|---|
 | `caddy_javascript_requests_total{status}` | counter | Responses the handler completed, labelled by status. |
 | `caddy_javascript_timeouts_total` | counter | Handler invocations and async callbacks interrupted by the watchdog. |
-| `caddy_javascript_queue_full_total` | counter | Requests rejected because the event queue was full. |
+| `caddy_javascript_queue_full_total` | counter | Requests and callbacks rejected or dropped because the event queue was full. |
 | `caddy_javascript_reloads_total` | counter | Successful script reloads. |
 
 Log messages to look for:
@@ -914,7 +922,10 @@ not exposed outside the container by default.
 - One event loop per directive instance. Multiple instances, sites, or Caddy
   processes are independent and share no VM state.
 - `queue_size` is task slots, not concurrent requests. Memory per queued task is
-  small, but dropped callbacks stall responses, so leave headroom.
+  small, but a full queue drops callbacks and fails their exchanges, so leave
+  headroom.
+- Filesystem, `fetch`, and static file work is bounded to 64 goroutines per
+  instance. A burst beyond that queues instead of spawning more goroutines.
 - Reload rebuilds the VM, so routes are re-registered from the script on every
   reload.
 

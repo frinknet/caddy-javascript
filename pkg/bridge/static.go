@@ -78,7 +78,7 @@ func (p *Program) serveStaticFile(cfg *router.Static, rest, fullPath, method str
 	}
 
 	name := path.Join("/", cfg.Root, rest)
-	go func() {
+	p.goIO(func() {
 		file, info, finalName, isDir, ok := resolveStatic(p.fs, name, cfg)
 		if ok && isDir && !strings.HasSuffix(rest, "/") {
 			if file != nil {
@@ -111,7 +111,7 @@ func (p *Program) serveStaticFile(cfg *router.Static, rest, fullPath, method str
 				http.Error(ex.Writer(), http.StatusText(http.StatusNotFound), http.StatusNotFound)
 			}
 		})
-	}()
+	})
 }
 
 func (p *Program) serveStaticContent(ex *Exchange, cfg *router.Static, file *os.File, info os.FileInfo, name, method, fullPath string, headers http.Header) {

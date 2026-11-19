@@ -174,6 +174,13 @@ app.get('/fetch-blocked', (req, res) => {
   })
 })
 
+app.get('/fetch-blocked-code', (req, res) => {
+  fetch('http://example.com/', (err) => {
+    if (err) return res.status(403).send(err.code)
+    res.status(200).send('allowed')
+  })
+})
+
 app.get('/fetch/promise', (req, res) => {
   fetch(BASE + '/hello')
     .then((upstream) => upstream.text())
@@ -378,6 +385,13 @@ app.get('/fs/clamp', (req, res) => {
 app.get('/fs/missing', (req, res) => {
   fs.readFile('tmp/nope.txt', (err) => {
     if (err) return res.status(500).send(String(err))
+    res.send('unexpected')
+  })
+})
+
+app.get('/fs/missing-code', (req, res) => {
+  fs.readFile('tmp/nope.txt', (err) => {
+    if (err) return res.status(500).send(err.code)
     res.send('unexpected')
   })
 })
