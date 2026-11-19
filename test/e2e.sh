@@ -303,6 +303,13 @@ check "app.all matches every method" GET /express/any --status 200 --equals GET
 check "app.all matches POST" POST /express/any --status 200 --equals POST
 check "app.options matches OPTIONS" OPTIONS /express/options --status 200 --hdr Allow 'GET, PUT, DELETE'
 check "app.head matches a HEAD request" HEAD /express/head --status 200 --hdr X-Head yes
+check "app.set and app.get settings" GET /express/settings --status 200 --equals '{"disabled":true,"enabled":true,"name":"caddy"}'
+check "an async route handler completes" GET /express/async --status 200 --equals 'async ok'
+check "next('route') skips the rest of the route" GET /express/route-skip --status 200 --equals 'next route'
+check "res.send sends a Buffer" GET /express/buffer --status 200 --ctype application/octet-stream --equals 'buffer body'
+check "res.set accepts an object" GET /express/headers --status 200 --ctype application/json --equals '{"answer":42,"header":"1"}' --hdr-contains X-Two a
+check "res.format negotiates the response type" GET /express/cookies --status 200 --header 'Accept: application/json' --header 'Cookie: sid=abc' --equals '{"sid":"abc"}'
+check "res.download sets the disposition" GET /express/download --status 200 --ctype text/plain --hdr Content-Disposition 'attachment; filename=renamed.txt' --equals 'static hello'
 check "express.Router() registers routes relative to its mount" GET /api/hello --status 200 --equals 'router hello'
 check "mounted router captures params" GET /api/user/9 --status 200 --ctype application/json --equals '{"id":"9"}'
 check "router.route chains methods on one path" GET /api/chain/5 --status 200 --equals '{"id":"5"}'

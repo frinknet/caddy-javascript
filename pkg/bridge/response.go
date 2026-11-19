@@ -116,8 +116,12 @@ func (s *ResponseWriter) writeStatusThen(b []byte) {
 
 func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Object {
 	res := p.rt.NewObject()
+	_ = res.Set("locals", p.rt.NewObject())
+	_ = res.Set("app", p.appObj)
 	if req != nil {
 		_ = res.Set("req", req)
+		_ = req.Set("res", res)
+		_ = req.Set("app", p.appObj)
 	}
 
 	_ = res.Set("status", func(call sobek.FunctionCall) sobek.Value {
@@ -125,8 +129,28 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 		return res
 	})
 
-	_ = res.Set("set", func(call sobek.FunctionCall) sobek.Value {
-		w.Header().Set(call.Argument(0).String(), call.Argument(1).String())
+	set := func(call sobek.FunctionCall) sobek.Value {
+		if len(call.Arguments) == 1 {
+			setHeaderObject(w.Header(), call.Argument(0), p.rt)
+			return res
+		}
+		setHeaderValue(w.Header(), call.Argument(0).String(), call.Argument(1))
+		return res
+	}
+	_ = res.Set("set", set)
+	_ = res.Set("header", set)
+
+	_ = res.Set("get", func(call sobek.FunctionCall) sobek.Value {
+		value := w.Header().Get(call.Argument(0).String())
+		if value == "" {
+			return sobek.Undefined()
+		}
+		return p.rt.ToValue(value)
+	})
+	_ = res.Set("getHeader", res.Get("get"))
+
+	_ = res.Set("removeHeader", func(call sobek.FunctionCall) sobek.Value {
+		w.Header().Del(call.Argument(0).String())
 		return res
 	})
 
@@ -144,7 +168,7 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 	})
 
 	_ = res.Set("type", func(call sobek.FunctionCall) sobek.Value {
-		w.Header().Set("Content-Type", call.Argument(0).String())
+		w.Header().Set("Content-Type", contentTypeFor(call.Argument(0).String()))
 		return res
 	})
 
@@ -169,6 +193,37 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 		return res
 	})
 
+	_ = res.Set("clearCookie", func(call sobek.FunctionCall) sobek.Value {
+		cookie := &http.Cookie{Name: call.Argument(0).String(), Value: "", Path: "/", Expires: time.Unix(1, 0), MaxAge: -1}
+		if opts := call.Argument(1); !isNilValue(opts) {
+			if obj := opts.ToObject(p.rt); obj != nil {
+				if v := obj.Get("path"); !isNilValue(v) {
+					cookie.Path = v.String()
+				}
+				if v := obj.Get("domain"); !isNilValue(v) {
+					cookie.Domain = v.String()
+				}
+				if v := obj.Get("secure"); !isNilValue(v) {
+					cookie.Secure = v.ToBoolean()
+				}
+				if v := obj.Get("httpOnly"); !isNilValue(v) {
+					cookie.HttpOnly = v.ToBoolean()
+				}
+			}
+		}
+		w.Header().Add("Set-Cookie", cookie.String())
+		return res
+	})
+
+	_ = res.Set("attachment", func(call sobek.FunctionCall) sobek.Value {
+		filename := ""
+		if len(call.Arguments) > 0 && !isNilValue(call.Argument(0)) {
+			filename = call.Argument(0).String()
+		}
+		w.Header().Set("Content-Disposition", contentDisposition(filename))
+		return res
+	})
+
 	_ = res.Set("redirect", func(call sobek.FunctionCall) sobek.Value {
 		code := http.StatusFound
 		location := ""
@@ -181,6 +236,12 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 			code = int(call.Argument(0).ToInteger())
 			location = call.Argument(1).String()
 		}
+		if location == "back" {
+			location = p.requestHeader(req, "Referer")
+			if location == "" {
+				location = "/"
+			}
+		}
 		w.Header().Set("Location", location)
 		w.SetStatus(code)
 		w.writeStatusThen(nil)
@@ -188,10 +249,17 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 	})
 
 	_ = res.Set("send", func(call sobek.FunctionCall) sobek.Value {
-		body, contentType := encodeBody(call.Argument(0))
+		body, contentType := p.encodeBody(call.Argument(0))
 		w.setContentType(contentType)
 		w.writeStatusThen(body)
 		return res
+	})
+
+	_ = res.Set("write", func(call sobek.FunctionCall) sobek.Value {
+		body, contentType := p.encodeBody(call.Argument(0))
+		w.setContentType(contentType)
+		w.writeStatusThen(body)
+		return p.rt.ToValue(true)
 	})
 
 	_ = res.Set("sendStatus", func(call sobek.FunctionCall) sobek.Value {
@@ -223,11 +291,72 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 				cb = fn
 				continue
 			}
+			if root, ok := value.Export().(string); ok {
+				opts = p.rt.NewObject()
+				_ = opts.Set("root", root)
+				continue
+			}
 			if obj := value.ToObject(p.rt); obj != nil {
 				opts = obj
 			}
 		}
 		p.sendFile(w, req, name, opts, cb)
+		return res
+	})
+
+	_ = res.Set("download", func(call sobek.FunctionCall) sobek.Value {
+		name := call.Argument(0).String()
+		filename := ""
+		var opts *sobek.Object
+		var cb sobek.Callable
+		for i := 1; i < len(call.Arguments); i++ {
+			value := call.Argument(i)
+			if isNilValue(value) {
+				continue
+			}
+			if fn, ok := sobek.AssertFunction(value); ok {
+				cb = fn
+				continue
+			}
+			if text, ok := value.Export().(string); ok {
+				filename = text
+				continue
+			}
+			if obj := value.ToObject(p.rt); obj != nil {
+				opts = obj
+			}
+		}
+		if filename == "" {
+			filename = path.Base(name)
+		}
+		w.Header().Set("Content-Disposition", contentDisposition(filename))
+		p.sendFile(w, req, name, opts, cb)
+		return res
+	})
+
+	_ = res.Set("format", func(call sobek.FunctionCall) sobek.Value {
+		formats := call.Argument(0).ToObject(p.rt)
+		if formats == nil {
+			return res
+		}
+		accept := p.requestHeader(req, "Accept")
+		for _, key := range formats.Keys() {
+			if accept != "" && !acceptsAny(accept, key) {
+				continue
+			}
+			fn, ok := sobek.AssertFunction(formats.Get(key))
+			if !ok {
+				continue
+			}
+			_, _ = fn(sobek.Undefined(), req, res)
+			return res
+		}
+		http.Error(w, http.StatusText(http.StatusNotAcceptable), http.StatusNotAcceptable)
+		return res
+	})
+
+	_ = res.Set("vary", func(call sobek.FunctionCall) sobek.Value {
+		w.Header().Add("Vary", call.Argument(0).String())
 		return res
 	})
 
@@ -243,7 +372,7 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 
 	_ = res.Set("end", func(call sobek.FunctionCall) sobek.Value {
 		if len(call.Arguments) > 0 {
-			body, contentType := encodeBody(call.Argument(0))
+			body, contentType := p.encodeBody(call.Argument(0))
 			w.setContentType(contentType)
 			w.writeStatusThen(body)
 			return res
@@ -260,9 +389,20 @@ func (p *Program) BuildResponse(w *ResponseWriter, req *sobek.Object) *sobek.Obj
 	return res
 }
 
-func encodeBody(v sobek.Value) ([]byte, string) {
+func (p *Program) encodeBody(v sobek.Value) ([]byte, string) {
 	if v == nil || sobek.IsUndefined(v) || sobek.IsNull(v) {
 		return nil, "text/plain; charset=utf-8"
+	}
+	if ab, ok := v.Export().(sobek.ArrayBuffer); ok {
+		return ab.Bytes(), "application/octet-stream"
+	}
+	if data, ok := v.Export().([]byte); ok {
+		return data, "application/octet-stream"
+	}
+	if obj := v.ToObject(p.rt); obj != nil {
+		if isBuffer := obj.Get("_isBuffer"); isBuffer != nil && isBuffer.ToBoolean() {
+			return bufferBytes(obj), "application/octet-stream"
+		}
 	}
 	if s, ok := v.Export().(string); ok {
 		return []byte(s), "text/plain; charset=utf-8"
@@ -272,6 +412,65 @@ func encodeBody(v sobek.Value) ([]byte, string) {
 		return []byte(v.String()), "text/plain; charset=utf-8"
 	}
 	return data, "application/json; charset=utf-8"
+}
+
+func setHeaderObject(header http.Header, value sobek.Value, rt *sobek.Runtime) {
+	obj := value.ToObject(rt)
+	if obj == nil {
+		return
+	}
+	for _, key := range obj.Keys() {
+		setHeaderValue(header, key, obj.Get(key))
+	}
+}
+
+func setHeaderValue(header http.Header, name string, value sobek.Value) {
+	if items, ok := value.Export().([]interface{}); ok {
+		header.Del(name)
+		for _, item := range items {
+			header.Add(name, fmt.Sprint(item))
+		}
+		return
+	}
+	header.Set(name, value.String())
+}
+
+func contentDisposition(filename string) string {
+	if filename == "" {
+		return "attachment"
+	}
+	return mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+}
+
+func acceptsAny(accept, candidate string) bool {
+	for _, part := range strings.Split(accept, ",") {
+		mediaType := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if matchesMediaType(mediaType, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentTypeFor(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.Contains(value, "/") {
+		if mediaType := mime.TypeByExtension("." + strings.TrimPrefix(value, ".")); mediaType != "" {
+			value = mediaType
+		}
+	}
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return value
+	}
+	if _, ok := params["charset"]; !ok && (strings.HasPrefix(mediaType, "text/") || mediaType == "application/json" || mediaType == "application/javascript" || strings.HasSuffix(mediaType, "+json")) {
+		params["charset"] = "utf-8"
+		return mime.FormatMediaType(mediaType, params)
+	}
+	return mime.FormatMediaType(mediaType, params)
 }
 
 func (p *Program) requestHeader(req *sobek.Object, name string) string {

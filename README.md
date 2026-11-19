@@ -51,10 +51,17 @@ app.use((req, res) => {
 
 - Pure Go, `CGO_ENABLED=0`, cross-compiles with `xcaddy`.
 - Express-shaped routing: `app.get`/`app.post`/`app.put`/`app.delete`/`app.all`,
-  `app.use` middleware, ordered `next()` chains, path parameters, optional
-  segments, wildcards, mounted routers, and static file middleware.
-- Request and response helpers: JSON and form bodies, query strings, headers,
-  status codes, redirects, content types.
+  `app.use` middleware, ordered `next()` chains, `next('route')`, path
+  parameters, optional segments, wildcards, mounted routers, and static file
+  middleware.
+- Express-compatible body parsing: `express.json()`, `express.urlencoded()`,
+  `express.text()`, `express.raw()`, and `require('body-parser')`, plus
+  application settings and `app.locals`.
+- Request and response helpers: JSON and form bodies, query strings, cookies,
+  headers, status codes, redirects, content types, `res.download`,
+  `res.format`, and `res.vary`.
+- Async route handling: handlers may be `async` functions and promises returned
+  by a handler keep the request open.
 - Module support: CommonJS `require` with `node_modules` resolution, ES modules
   (`import`/`export`), and pure-Go shims for `fs`, `path`, `express`, `buffer`,
   `events`, `url`, `querystring`, and `util`.
@@ -268,7 +275,12 @@ the defaults listed above.
 | `app.post(path, ...fns)` | Register a POST route. |
 | `app.put`, `app.delete`, `app.patch`, `app.head`, `app.options` | Same, for those methods. |
 | `app.all(path, ...fns)` | Register a route for every method. |
-| `app.use([path,] ...fns)` | Register middleware. Without a path it matches every request; with one it matches that path and everything under it. |
+| `app.use([path,] ...fns)` | Register middleware. Without a path it matches every request; with one it matches that path and everything under it. Arrays of middleware are accepted. |
+| `app.set(name, value)` | Store an application setting. |
+| `app.get(name)` | Read a setting when called with one argument. |
+| `app.enable(name)` / `app.disable(name)` | Set a boolean setting. |
+| `app.enabled(name)` / `app.disabled(name)` | Read a boolean setting. |
+| `app.locals` | Application-local values shared with every request. |
 | `app.listen(...)` | No-op that returns the app. Caddy owns the listener. |
 
 `require('express')` returns a factory that hands back the same app object, so
@@ -278,16 +290,25 @@ unmodified Express style works:
 const express = require('express')
 const app = express()
 
+app.use(express.json())
 app.get('/', (req, res) => res.send('hi'))
 app.listen(3000)
 ```
 
+`express.json()`, `express.urlencoded()`, `express.text()`, `express.raw()`,
+and `require('body-parser')` return middleware. Bodies are already parsed from
+`Content-Type` before the handler runs, so these middleware are accepted for
+compatibility and simply continue the chain.
+
 Layers run in registration order, the way Express runs its stack. A handler
 advances the chain with `next()`, and `next(err)` skips ahead to the next error
-handler, which is a function taking four arguments `(err, req, res, next)`. A
-handler that never calls `next()` ends the chain. Writing a response does not
-stop the chain, but the first write commits the response and later writes are
-ignored. Registering the same method and path twice appends both, so both run.
+handler, which is a function taking four arguments `(err, req, res, next)`.
+`next('route')` skips the rest of the current route's handlers. A handler that
+never calls `next()` ends the chain. Writing a response does not stop the
+chain, but the first write commits the response and later writes are ignored.
+Registering the same method and path twice appends both, so both run. A
+handler may be an `async` function, and a promise returned by a handler keeps
+the request open until it settles.
 
 Paths:
 
@@ -378,15 +399,24 @@ slash redirects to the slash with `301`. Dotfiles are ignored by default.
 | `req.path` | Decoded URL path. |
 | `req.method` | HTTP method. |
 | `req.host` | Request `Host`, including port when present. |
+| `req.hostname` | Request host without the port. |
+| `req.baseUrl` | Mount path for the current router. Currently empty. |
 | `req.url` | Request path including the query string. |
 | `req.originalUrl` | Request path as received, including the query string. Equal to `req.url` because handlers never rewrite the path. |
 | `req.ip` | Client address from the connection, without the port. |
 | `req.protocol` | `"https"` when the connection uses TLS, otherwise `"http"`. |
 | `req.secure` | `true` when `req.protocol` is `"https"`. |
+| `req.xhr` | `true` when `X-Requested-With` is `XMLHttpRequest`. |
+| `req.app` | The application object. |
+| `req.route` | The matched route (`path`, `method`). |
 | `req.params` | Path parameters captured by the matched route. |
+| `req.cookies` | Cookies parsed from the `Cookie` header. |
 | `req.headers` | Object of header values, canonical names (`Content-Type`), first value only. |
 | `req.header(name)` | Case-insensitive header lookup, first value or `undefined`. |
 | `req.get(name)` | Alias of `req.header(name)`. |
+| `req.param(name[, default])` | Look up a route parameter, body field, then query value. |
+| `req.accepts(...types)` | Best matching `Accept` type, or `false`. |
+| `req.is(...types)` | Matched `Content-Type`, or `false`. |
 | `req.query` | Object of query parameters, first value per name. |
 | `req.queryAll` | Object of arrays, every value per name. |
 | `req.body` | Parsed body (see below). |
@@ -409,17 +439,28 @@ Reading the body can fail earlier; that returns `400`.
 | Call | Behavior |
 |---|---|
 | `res.status(code)` | Set the status code. Chainable. Applies only until the response is written. |
-| `res.set(name, value)` | Set a header. Chainable. |
+| `res.set(name, value)` | Set a header. Also accepts an object of names to values. Chainable. |
+| `res.header(name, value)` | Alias of `res.set`. |
+| `res.get(name)` / `res.getHeader(name)` | Read a response header. |
+| `res.removeHeader(name)` | Remove a response header. Chainable. |
 | `res.append(name, value)` | Append a header value without replacing existing ones; an array appends each item. Chainable. |
-| `res.type(t)` | Set `Content-Type`. Chainable. |
-| `res.send(data)` | Send a body. Strings are sent as `text/plain; charset=utf-8`; other values are JSON-encoded as `application/json; charset=utf-8`; `null`/`undefined` send an empty body. |
+| `res.type(t)` | Set `Content-Type`. Extensions such as `json` and `html` are resolved through the MIME table. Chainable. |
+| `res.locals` | Per-response values for templates and handlers. |
+| `res.app` | The application object. |
+| `res.send(data)` | Send a body. Strings are sent as `text/plain; charset=utf-8`; Buffers and ArrayBuffers as `application/octet-stream`; other values are JSON-encoded as `application/json; charset=utf-8`; `null`/`undefined` send an empty body. |
 | `res.json(obj)` | JSON-encode and send with `application/json; charset=utf-8`. |
 | `res.sendStatus(code)` | Set the status, send the standard status text as `text/plain`, and finish. `204` and `304` send no body. |
+| `res.write(data)` | Write a chunk and keep the response open. |
 | `res.end([data])` | Send the optional body, or finish with the status already set. |
-| `res.redirect([code,] url)` | Set `Location` and finish. Default status is `302`. |
+| `res.redirect([code,] url)` | Set `Location` and finish. Default status is `302`; `'back'` uses the `Referer` header. |
 | `res.location(url)` | Set `Location` without finishing. `'back'` uses the `Referer` header, falling back to `/`. Chainable. |
 | `res.cookie(name, value[, opts])` | Add a `Set-Cookie` header. Options: `path` (default `/`), `domain`, `maxAge` (milliseconds), `expires`, `secure`, `httpOnly`, `sameSite`, and `encode` (a function; defaults to `encodeURIComponent`). Chainable. |
-| `res.sendFile(name[, opts][, cb])` | Serve a file from the sandbox. Options: `root` (paths are confined to it), `headers` (extra response headers), `maxAge` (milliseconds, sets `Cache-Control`), and `dotfiles` (`ignore` by default, or `deny`). A missing or refused file answers `404`, or calls `cb(err)` when given. Reads are asynchronous and bodies are skipped for `HEAD`. |
+| `res.clearCookie(name[, opts])` | Add an expired `Set-Cookie` header. Chainable. |
+| `res.attachment([filename])` | Set `Content-Disposition: attachment`. Chainable. |
+| `res.download(name[, filename][, opts][, cb])` | Serve a file as an attachment. |
+| `res.format(obj)` | Negotiate the `Accept` header and invoke the matching callback. |
+| `res.vary(field)` | Add a `Vary` header. Chainable. |
+| `res.sendFile(name[, opts][, cb])` | Serve a file from the sandbox. Options: `root` (paths are confined to it; a bare string is accepted as the root), `headers` (extra response headers), `maxAge` (milliseconds, sets `Cache-Control`), and `dotfiles` (`ignore` by default, or `deny`). A missing or refused file answers `404`, or calls `cb(err)` when given. Reads are asynchronous and bodies are skipped for `HEAD`. |
 | `res.flush()` | Flush the underlying `http.ResponseWriter` when it supports it. |
 
 Rules and caveats:
@@ -428,8 +469,8 @@ Rules and caveats:
   `res.set` calls have no effect on what was already sent.
 - Response helpers are chainable, so `res.status(201).type('text/plain').send('ok')`
   works.
-- There is no streaming writer. `res.send` writes the whole body, and
-  `res.flush()` only flushes what is already buffered.
+- The response is not a streaming API. `res.write` writes a chunk, but there
+  is no backpressure, and `res.flush()` only flushes what is already buffered.
 - A handler that returns without writing anything yields `404`, even if it
   matched a route.
 
@@ -822,8 +863,15 @@ not exposed outside the container by default.
 Not implemented today:
 
 - npm installation.
+- View engines and `res.render`.
+- `next('router')`.
 - Server-side streaming responses, SSE, and WebSocket upgrades.
 - Request-level cancellation of async work.
+
+Body parsers are compatibility middleware: request bodies are parsed from
+`Content-Type` before handlers run, so parser options such as `limit` and
+`strict` are not applied. Use the directive's `max_body` option for a request
+body limit.
 
 `spec.md` describes the design target and the intended Express parity.
 

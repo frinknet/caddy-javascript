@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -14,7 +15,52 @@ var routeMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OP
 
 func (p *Program) registerApp() {
 	app := p.rt.NewObject()
+	settings := p.rt.NewObject()
+	locals := p.rt.NewObject()
+	env := os.Getenv("NODE_ENV")
+	if env == "" {
+		env = "development"
+	}
+	_ = settings.Set("env", env)
 	p.installRoutes(app, p.routes, "app")
+	routeGet := app.Get("get")
+	_ = app.Set("get", func(call sobek.FunctionCall) sobek.Value {
+		if len(call.Arguments) == 1 {
+			value := settings.Get(call.Argument(0).String())
+			if value == nil {
+				return sobek.Undefined()
+			}
+			return value
+		}
+		fn, ok := sobek.AssertFunction(routeGet)
+		if !ok {
+			return sobek.Undefined()
+		}
+		value, _ := fn(app, call.Arguments...)
+		return value
+	})
+	set := func(call sobek.FunctionCall) sobek.Value {
+		_ = settings.Set(call.Argument(0).String(), call.Argument(1))
+		return app
+	}
+	_ = app.Set("set", set)
+	_ = app.Set("enable", func(call sobek.FunctionCall) sobek.Value {
+		_ = settings.Set(call.Argument(0).String(), p.rt.ToValue(true))
+		return app
+	})
+	_ = app.Set("disable", func(call sobek.FunctionCall) sobek.Value {
+		_ = settings.Set(call.Argument(0).String(), p.rt.ToValue(false))
+		return app
+	})
+	_ = app.Set("enabled", func(call sobek.FunctionCall) sobek.Value {
+		value := settings.Get(call.Argument(0).String())
+		return p.rt.ToValue(value != nil && value.ToBoolean())
+	})
+	_ = app.Set("disabled", func(call sobek.FunctionCall) sobek.Value {
+		value := settings.Get(call.Argument(0).String())
+		return p.rt.ToValue(value == nil || !value.ToBoolean())
+	})
+	_ = app.Set("locals", locals)
 	_ = app.Set("listen", func(call sobek.FunctionCall) sobek.Value {
 		return app
 	})
@@ -31,7 +77,21 @@ func (p *Program) registerApp() {
 	_ = expressObj.Set("static", func(call sobek.FunctionCall) sobek.Value {
 		return p.newStatic(call)
 	})
+	for _, name := range []string{"json", "urlencoded", "text", "raw"} {
+		_ = expressObj.Set(name, func(call sobek.FunctionCall) sobek.Value {
+			return p.bodyParserMiddleware()
+		})
+	}
 	p.expressObj = expressObj
+}
+
+func (p *Program) bodyParserMiddleware() sobek.Value {
+	return p.rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
+		if next, ok := sobek.AssertFunction(call.Argument(2)); ok {
+			_, _ = next(sobek.Undefined())
+		}
+		return sobek.Undefined()
+	})
 }
 
 // installRoutes gives an object the route registration surface. The app and
@@ -57,20 +117,21 @@ func (p *Program) installRoutes(obj *sobek.Object, table *router.Table, label st
 func (p *Program) routeChainSetter(table *router.Table, label string) func(sobek.FunctionCall) sobek.Value {
 	return func(call sobek.FunctionCall) sobek.Value {
 		path := call.Argument(0).String()
+		group := table.NextGroup()
 		route := p.rt.NewObject()
 		for _, method := range routeMethods {
 			method := method
 			name := label + ".route(...)." + strings.ToLower(method)
 			_ = route.Set(strings.ToLower(method), func(call sobek.FunctionCall) sobek.Value {
 				for _, h := range p.handlers(call, 0, name) {
-					table.Add(method, path, h.fn, h.arity)
+					table.AddGroup(method, path, h.fn, h.arity, group)
 				}
 				return route
 			})
 		}
 		_ = route.Set("all", func(call sobek.FunctionCall) sobek.Value {
 			for _, h := range p.handlers(call, 0, label+".route(...).all") {
-				table.Add("", path, h.fn, h.arity)
+				table.AddGroup("", path, h.fn, h.arity, group)
 			}
 			return route
 		})
@@ -85,8 +146,9 @@ func (p *Program) routeSetter(table *router.Table, method, label string) func(so
 	}
 	return func(call sobek.FunctionCall) sobek.Value {
 		path := call.Argument(0).String()
+		group := table.NextGroup()
 		for _, h := range p.handlers(call, 1, name) {
-			table.Add(method, path, h.fn, h.arity)
+			table.AddGroup(method, path, h.fn, h.arity, group)
 		}
 		return sobek.Undefined()
 	}
@@ -106,21 +168,31 @@ func (p *Program) useSetter(table *router.Table, label string) func(sobek.Functi
 		if start >= len(call.Arguments) {
 			panic(p.rt.NewTypeError("%s requires a function", name))
 		}
-		for i := start; i < len(call.Arguments); i++ {
-			value := call.Argument(i)
+		var add func(sobek.Value)
+		add = func(value sobek.Value) {
+			if obj := value.ToObject(p.rt); obj != nil && obj.ClassName() == "Array" {
+				length := int(obj.Get("length").ToInteger())
+				for i := 0; i < length; i++ {
+					add(obj.Get(fmt.Sprint(i)))
+				}
+				return
+			}
 			if sub, ok := p.routerTable(value); ok {
 				table.Mount(path, sub)
-				continue
+				return
 			}
 			if cfg, ok := p.staticConfig(value); ok {
 				table.UseStatic(path, cfg)
-				continue
+				return
 			}
 			fn, ok := sobek.AssertFunction(value)
 			if !ok {
 				panic(p.rt.NewTypeError("%s requires a function", name))
 			}
 			table.Use(path, fn, functionArity(p.rt, value))
+		}
+		for i := start; i < len(call.Arguments); i++ {
+			add(call.Argument(i))
 		}
 		return sobek.Undefined()
 	}

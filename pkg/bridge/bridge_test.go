@@ -555,12 +555,12 @@ func TestParseBodyJSONSuffix(t *testing.T) {
 func TestEncodeBody(t *testing.T) {
 	p := newTestProgram(t, time.Second)
 
-	body, contentType := encodeBody(p.rt.ToValue("hi"))
+	body, contentType := p.encodeBody(p.rt.ToValue("hi"))
 	if string(body) != "hi" || contentType != "text/plain; charset=utf-8" {
 		t.Fatalf("string: %q %q", body, contentType)
 	}
 
-	body, contentType = encodeBody(p.rt.ToValue(map[string]interface{}{"a": 1}))
+	body, contentType = p.encodeBody(p.rt.ToValue(map[string]interface{}{"a": 1}))
 	if string(body) != `{"a":1}` || contentType != "application/json; charset=utf-8" {
 		t.Fatalf("object: %q %q", body, contentType)
 	}
@@ -579,7 +579,11 @@ func serveScriptIn(t *testing.T, dir, script, method, path string, sched *fakeSc
 	}
 	t.Cleanup(func() { _ = fsys.Close() })
 
-	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, sched, nil)
+	var scheduler Scheduler
+	if sched != nil {
+		scheduler = sched
+	}
+	p := NewProgram(Config{Quit: make(chan struct{})}, fsys, scheduler, nil)
 	if err := p.Load([]byte(script)); err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -166,16 +167,21 @@ func (p *Program) BuildRequest(rc *RequestContext, params map[string]string) *so
 	_ = req.Set("path", rc.Path)
 	_ = req.Set("method", rc.Method)
 	_ = req.Set("host", rc.Host)
+	_ = req.Set("hostname", hostname(rc.Host))
 	_ = req.Set("url", rc.URL)
 	_ = req.Set("originalUrl", rc.OriginalURL)
+	_ = req.Set("baseUrl", "")
 	_ = req.Set("ip", rc.IP)
 	_ = req.Set("protocol", rc.Protocol)
 	_ = req.Set("secure", rc.Secure)
+	_ = req.Set("xhr", strings.EqualFold(firstHeader(rc.Headers, "X-Requested-With"), "XMLHttpRequest"))
+	_ = req.Set("app", p.appObj)
 	_ = req.Set("params", p.stringsObject(params))
 	_ = req.Set("headers", p.stringsObject(firstValues(rc.Headers)))
 	_ = req.Set("query", p.stringsObject(firstValues(rc.Query)))
 	_ = req.Set("queryAll", p.arraysObject(rc.Query))
 	_ = req.Set("body", p.toJSValue(rc.Body))
+	_ = req.Set("cookies", p.stringsObject(parseCookies(firstHeader(rc.Headers, "Cookie"))))
 
 	header := func(call sobek.FunctionCall) sobek.Value {
 		value, ok := headerValue(rc.Headers, call.Argument(0).String())
@@ -186,8 +192,124 @@ func (p *Program) BuildRequest(rc *RequestContext, params map[string]string) *so
 	}
 	_ = req.Set("header", header)
 	_ = req.Set("get", header)
+	_ = req.Set("param", func(call sobek.FunctionCall) sobek.Value {
+		name := call.Argument(0).String()
+		if value, ok := params[name]; ok {
+			return p.rt.ToValue(value)
+		}
+		if body, ok := rc.Body.(map[string]interface{}); ok {
+			if value, ok := body[name]; ok {
+				return p.toJSValue(value)
+			}
+		}
+		if values, ok := rc.Query[name]; ok && len(values) > 0 {
+			return p.rt.ToValue(values[0])
+		}
+		return call.Argument(1)
+	})
+	_ = req.Set("accepts", func(call sobek.FunctionCall) sobek.Value {
+		return p.accepts(rc, call.Arguments)
+	})
+	_ = req.Set("is", func(call sobek.FunctionCall) sobek.Value {
+		return p.requestIs(rc, call.Arguments)
+	})
 
 	return req
+}
+
+func hostname(host string) string {
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		return name
+	}
+	return strings.Trim(host, "[]")
+}
+
+func (p *Program) accepts(rc *RequestContext, args []sobek.Value) sobek.Value {
+	wanted := flattenMediaTypes(args)
+	if len(wanted) == 0 {
+		return p.rt.ToValue(false)
+	}
+	accept, _ := headerValue(rc.Headers, "Accept")
+	if accept == "" {
+		return p.rt.ToValue(wanted[0])
+	}
+	for _, candidate := range wanted {
+		for _, part := range strings.Split(accept, ",") {
+			mediaType := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+			if matchesMediaType(mediaType, candidate) {
+				return p.rt.ToValue(candidate)
+			}
+		}
+	}
+	return p.rt.ToValue(false)
+}
+
+func (p *Program) requestIs(rc *RequestContext, args []sobek.Value) sobek.Value {
+	contentType, ok := headerValue(rc.Headers, "Content-Type")
+	if !ok || contentType == "" {
+		return p.rt.ToValue(false)
+	}
+	actual, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return p.rt.ToValue(false)
+	}
+	for _, candidate := range flattenMediaTypes(args) {
+		if !strings.Contains(candidate, "/") {
+			if mapped := mime.TypeByExtension("." + strings.TrimPrefix(candidate, ".")); mapped != "" {
+				candidate = strings.SplitN(mapped, ";", 2)[0]
+			}
+		}
+		if matchesMediaType(actual, candidate) {
+			return p.rt.ToValue(candidate)
+		}
+	}
+	return p.rt.ToValue(false)
+}
+
+func flattenMediaTypes(args []sobek.Value) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if items, ok := arg.Export().([]interface{}); ok {
+			for _, item := range items {
+				out = append(out, fmt.Sprint(item))
+			}
+			continue
+		}
+		if !isNilValue(arg) {
+			out = append(out, arg.String())
+		}
+	}
+	return out
+}
+
+func matchesMediaType(actual, wanted string) bool {
+	if wanted == "" || wanted == "*/*" || wanted == actual {
+		return true
+	}
+	if strings.HasSuffix(wanted, "/*") {
+		return strings.HasPrefix(actual, strings.TrimSuffix(wanted, "*"))
+	}
+	return false
+}
+
+func firstHeader(headers map[string][]string, name string) string {
+	value, _ := headerValue(headers, name)
+	return value
+}
+
+func parseCookies(header string) map[string]string {
+	out := make(map[string]string)
+	for _, part := range strings.Split(header, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || name == "" {
+			continue
+		}
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			value = decoded
+		}
+		out[name] = value
+	}
+	return out
 }
 
 // headerValue looks a header up case-insensitively, returning the first value.

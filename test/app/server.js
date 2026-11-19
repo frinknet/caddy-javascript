@@ -8,6 +8,7 @@ const url = require('url')
 const qs = require('querystring')
 const util = require('util')
 const EventEmitter = require('events')
+const express = require('express')
 
 const BASE = 'http://127.0.0.1'
 
@@ -201,7 +202,6 @@ app.get('/fetch/reject', (req, res) => {
     .catch((err) => res.status(502).send(err.message))
 })
 
-const express = require('express')
 const api = express()
 
 api.get('/express/hello', (req, res) => res.send('express hello'))
@@ -212,6 +212,40 @@ api.all('/express/any', (req, res) => res.send(req.method))
 api.options('/express/options', (req, res) => res.set('Allow', 'GET, PUT, DELETE').send(''))
 api.head('/express/head', (req, res) => {
   res.set('X-Head', 'yes').send('')
+})
+api.get('/express/settings', (req, res) => {
+  api.set('name', 'caddy')
+  api.enable('trust proxy')
+  res.json({
+    name: api.get('name'),
+    enabled: api.enabled('trust proxy'),
+    disabled: api.disabled('missing')
+  })
+})
+api.get('/express/async', async (req, res) => {
+  await Promise.resolve()
+  res.send('async ok')
+})
+api.get('/express/route-skip',
+  (req, res, next) => next('route'),
+  (req, res) => res.status(500).send('skipped'))
+api.get('/express/route-skip', (req, res) => res.send('next route'))
+api.get('/express/buffer', (req, res) => {
+  res.send(Buffer.from('buffer body'))
+})
+api.get('/express/headers', (req, res) => {
+  res.set({ 'X-One': '1', 'X-Two': ['a', 'b'] })
+  res.locals.answer = 42
+  res.type('json').send({ header: res.get('X-One'), answer: res.locals.answer })
+})
+api.get('/express/cookies', (req, res) => {
+  res.format({
+    'application/json': () => res.json({ sid: req.cookies.sid || null }),
+    'text/plain': () => res.send(req.cookies.sid || '')
+  })
+})
+api.get('/express/download', (req, res) => {
+  res.download('public/hello.txt', 'renamed.txt')
 })
 api.listen(3000)
 

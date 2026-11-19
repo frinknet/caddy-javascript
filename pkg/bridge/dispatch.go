@@ -25,6 +25,7 @@ type Chain struct {
 	errMsg    string
 	nextCalls int
 	done      bool
+	current   *router.Layer
 }
 
 // RunChain runs the matched layers. It returns an error only when the runtime
@@ -40,8 +41,29 @@ func (p *Program) RunChain(ex *Exchange, layers []*router.Layer, req, res *sobek
 
 func (c *Chain) advance(errVal sobek.Value) sobek.Value {
 	c.nextCalls++
+	if !isNilValue(errVal) && c.current != nil {
+		switch errVal.String() {
+		case "route":
+			c.skipRoute(c.current)
+			_ = c.step(sobek.Undefined())
+			return sobek.Undefined()
+		}
+	}
 	_ = c.step(errVal)
 	return sobek.Undefined()
+}
+
+func (c *Chain) skipRoute(layer *router.Layer) {
+	if layer == nil || layer.Use {
+		return
+	}
+	for c.index < len(c.layers) {
+		next := c.layers[c.index]
+		if next.Use || next.RouteGroup != layer.RouteGroup {
+			return
+		}
+		c.index++
+	}
 }
 
 func (c *Chain) step(errVal sobek.Value) error {
@@ -86,7 +108,14 @@ func (c *Chain) step(errVal sobek.Value) error {
 		}
 
 		mark := c.nextCalls
-		_, err := layer.Fn(sobek.Undefined(), args...)
+		c.current = layer
+		if c.req != nil {
+			route := c.p.rt.NewObject()
+			_ = route.Set("path", layer.Path)
+			_ = route.Set("method", layer.Method)
+			_ = c.req.Set("route", route)
+		}
+		ret, err := layer.Fn(sobek.Undefined(), args...)
 		if err != nil {
 			var interrupted *sobek.InterruptedError
 			if errors.As(err, &interrupted) {
@@ -98,12 +127,62 @@ func (c *Chain) step(errVal sobek.Value) error {
 			continue
 		}
 
+		if c.awaitPromise(ret) {
+			return nil
+		}
+
 		if c.nextCalls > mark {
 			return nil
 		}
 		c.report()
 		return nil
 	}
+}
+
+func (c *Chain) awaitPromise(value sobek.Value) bool {
+	if isNilValue(value) {
+		return false
+	}
+	obj := value.ToObject(c.p.rt)
+	if obj == nil {
+		return false
+	}
+	then, ok := sobek.AssertFunction(obj.Get("then"))
+	if !ok {
+		return false
+	}
+	ex, err := c.p.trackAsync()
+	if err != nil {
+		c.pending = c.errorValue(err)
+		c.errMsg = err.Error()
+		return false
+	}
+	onFulfilled := func(call sobek.FunctionCall) sobek.Value {
+		if ex != nil {
+			c.p.submitAsync(ex, func() {})
+		}
+		return sobek.Undefined()
+	}
+	onRejected := func(call sobek.FunctionCall) sobek.Value {
+		reason := call.Argument(0)
+		if ex != nil {
+			c.p.submitAsync(ex, func() {
+				if !isNilValue(reason) && c.ex != nil && !c.ex.Writer().Written() {
+					c.ex.SetError(errors.New(reason.String()))
+				}
+			})
+		}
+		return sobek.Undefined()
+	}
+	if _, err := then(obj, c.p.rt.ToValue(onFulfilled), c.p.rt.ToValue(onRejected)); err != nil {
+		if ex != nil {
+			c.p.submitAsync(ex, func() {})
+		}
+		c.pending = c.errorValue(err)
+		c.errMsg = err.Error()
+		return false
+	}
+	return true
 }
 
 // errorValue returns the value handed to an error handler: the original

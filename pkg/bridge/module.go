@@ -32,6 +32,8 @@ func (p *Program) builtin(name string) (sobek.Value, bool) {
 		return p.pathObj, true
 	case "express", "node:express":
 		return p.expressObj, true
+	case "body-parser", "node:body-parser":
+		return p.expressObj, true
 	case "buffer", "node:buffer":
 		return p.bufferObj, true
 	case "url", "node:url":

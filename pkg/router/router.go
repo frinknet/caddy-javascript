@@ -49,11 +49,12 @@ type ParamBinding struct {
 // when the request matches the mount prefix. A static layer (Static set) is a
 // prefix middleware served by the bridge.
 type Layer struct {
-	Method string
-	Path   string
-	Use    bool
-	Fn     sobek.Callable
-	Arity  int
+	Method     string
+	Path       string
+	Use        bool
+	Fn         sobek.Callable
+	Arity      int
+	RouteGroup uint64
 
 	// Base is the actual path prefix consumed by enclosing mounts. The bridge
 	// uses it to resolve a static layer's directory, and it is only set on the
@@ -80,8 +81,9 @@ type segment struct {
 // Table holds the registered layers in registration order, which is the order
 // they are tried in.
 type Table struct {
-	layers []*Layer
-	params map[string][]*Param
+	layers    []*Layer
+	params    map[string][]*Param
+	nextGroup uint64
 }
 
 func New() *Table {
@@ -99,7 +101,18 @@ func (t *Table) Param(name string, fn sobek.Callable, arity int) {
 // Add registers a route for one method and path. Method may be empty to match
 // every method.
 func (t *Table) Add(method, path string, fn sobek.Callable, arity int) {
-	t.layers = append(t.layers, newLayer(method, path, false, fn, arity))
+	t.AddGroup(method, path, fn, arity, 0)
+}
+
+func (t *Table) AddGroup(method, path string, fn sobek.Callable, arity int, group uint64) {
+	layer := newLayer(method, path, false, fn, arity)
+	layer.RouteGroup = group
+	t.layers = append(t.layers, layer)
+}
+
+func (t *Table) NextGroup() uint64 {
+	t.nextGroup++
+	return t.nextGroup
 }
 
 // Use registers middleware. An empty path matches everything, otherwise the
