@@ -108,6 +108,7 @@ type VM struct {
 	currentScript string
 	varsFactory   quickjs.Value
 	headerFactory quickjs.Value
+	abortFactory  quickjs.Value
 	active        *requestState
 	registry      *template.Registry
 	templateFuncs map[string]any
@@ -326,6 +327,12 @@ func New(cfg Config) (*VM, error) {
 		return nil, fmt.Errorf("javascript: install headers bridge: %w", err)
 	}
 	v.headerFactory = headerFactory
+	abortFactory, err := rt.Eval(abortFactorySource)
+	if err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install request signal: %w", err)
+	}
+	v.abortFactory = abortFactory
 	proto, err := rt.Eval("Object.getPrototypeOf(globalThis)")
 	if err != nil {
 		v.cleanupNew()
@@ -351,6 +358,10 @@ func New(cfg Config) (*VM, error) {
 	if err := v.installTemplate(); err != nil {
 		v.cleanupNew()
 		return nil, fmt.Errorf("javascript: install template: %w", err)
+	}
+	if err := v.installFetchSignal(); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install fetch signal: %w", err)
 	}
 
 	v.currentScript = script
@@ -473,6 +484,8 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 
 		httpObj, err := v.newHTTP(ctx, st, resp)
 		if err == nil {
+			prev := v.rt.SetAsyncContext(st.signal)
+			defer v.rt.SetAsyncContext(prev)
 			var responded bool
 			responded, err = v.runChain(ctx, st, httpObj, layers)
 			if err == nil && !responded && !resp.responded() {

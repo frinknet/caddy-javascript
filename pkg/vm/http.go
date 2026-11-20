@@ -83,6 +83,30 @@ const varsFactorySource = `(function (get, set, has, del, keys) {
 	})
 })`
 
+// abortFactorySource builds the per-request AbortSignal. The Go side aborts it
+// when the client disconnects, the dispatch deadline ends, or the request
+// finishes, so a script can stop the work it started.
+const abortFactorySource = `(function () {
+	const controller = new AbortController()
+	return { signal: controller.signal, abort: () => controller.abort() }
+})`
+
+// fetchFactorySource makes fetch inherit the dispatch's AbortSignal. The async
+// context carries the signal through awaits, promise jobs, and timers, so a
+// fetch with no explicit signal still stops when the request ends. A signal the
+// script passes itself wins.
+const fetchFactorySource = `(function (currentSignal) {
+	const real = globalThis.fetch
+	if (typeof real !== "function") return
+	globalThis.fetch = function (input, init) {
+		if (init && init.signal) return real(input, init)
+		if (input !== null && typeof input === "object" && input.signal) return real(input, init)
+		const signal = currentSignal()
+		if (signal == null) return real(input, init)
+		return real(input, init ? Object.assign({}, init, { signal }) : { signal })
+	}
+})`
+
 // headersFactorySource wraps the request headers in a Proxy, so a script reads
 // and writes them as ordinary properties.
 const headersFactorySource = `(function (get, set, has, del, keys) {
@@ -131,11 +155,14 @@ type requestState struct {
 	calls    int
 	maxCalls int
 
-	v        *VM
-	stream   *streamState
-	ws       *wsConn
-	lifetime context.Context
-	hijack   func() (net.Conn, *bufio.ReadWriter, error)
+	v         *VM
+	stream    *streamState
+	ws        *wsConn
+	lifetime  context.Context
+	hijack    func() (net.Conn, *bufio.ReadWriter, error)
+	signal    quickjs.Value
+	abortFn   quickjs.Value
+	abortOnce sync.Once
 }
 
 func newRequestState(v *VM, req Request, resp *response) (*requestState, error) {
@@ -178,6 +205,17 @@ func (s *requestState) finish() {
 	if ws != nil {
 		ws.shutdown()
 	}
+}
+
+// abort fires the request's AbortSignal once. The abort runs on the VM
+// goroutine; a loop that has already stopped drops it.
+func (s *requestState) abort() {
+	s.abortOnce.Do(func() {
+		fn := s.abortFn
+		s.v.loop.Post(func() {
+			_, _ = fn.Call()
+		})
+	})
 }
 
 func (s *requestState) setWebSocket(ws *wsConn) {
@@ -549,6 +587,34 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 		}
 	}
 
+	abort, err := v.abortFactory.Call()
+	if err != nil {
+		return quickjs.Value{}, fmt.Errorf("javascript: create request signal: %w", err)
+	}
+	signal, err := abort.Get("signal")
+	if err != nil {
+		return quickjs.Value{}, fmt.Errorf("javascript: create request signal: %w", err)
+	}
+	abortFn, err := abort.Get("abort")
+	if err != nil {
+		return quickjs.Value{}, fmt.Errorf("javascript: create request signal: %w", err)
+	}
+	if err := obj.Set("signal", signal); err != nil {
+		return quickjs.Value{}, err
+	}
+	st.signal = signal
+	st.abortFn = abortFn
+	if st.lifetime != nil {
+		context.AfterFunc(st.lifetime, st.abort)
+		if ctx != st.lifetime {
+			context.AfterFunc(ctx, func() {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					st.abort()
+				}
+			})
+		}
+	}
+
 	vars, err := v.newVars(ctx, st)
 	if err != nil {
 		return quickjs.Value{}, err
@@ -557,6 +623,27 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 		return quickjs.Value{}, err
 	}
 	return obj, nil
+}
+
+// installFetchSignal wraps fetch so it defaults to the request's signal. The
+// wrapper is installed once, before the entry module runs.
+func (v *VM) installFetchSignal() error {
+	install, err := v.rt.Eval(fetchFactorySource)
+	if err != nil {
+		return err
+	}
+	_, err = install.Call(v.currentSignal)
+	return err
+}
+
+// currentSignal returns the signal of the request whose async context is
+// active, or nil outside a dispatch.
+func (v *VM) currentSignal() any {
+	signal := v.rt.AsyncContext()
+	if signal.IsUndefined() || signal.IsNull() {
+		return nil
+	}
+	return signal
 }
 
 func (v *VM) newVars(ctx context.Context, st *requestState) (quickjs.Value, error) {

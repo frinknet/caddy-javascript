@@ -3,6 +3,14 @@ route("/surface/layer*", (http) => {
 })
 
 export default function handler(http) {
+	if (http.path === "/surface/signal") {
+		http.respond(200, {}, [
+			typeof http.signal,
+			http.signal instanceof AbortSignal,
+			http.signal.aborted,
+		].join("|"))
+		return
+	}
 	http.vars.echo = http.query.q ?? "-"
 	http.respond(200, {
 		"content-type": "text/plain",

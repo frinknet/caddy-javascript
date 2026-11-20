@@ -360,6 +360,7 @@ check "handle directives share the site realm and module cache" GET /api/two --h
 
 check "route layers set request headers" GET "/surface/layer/hello?q=z" --host shared.example --cookie "c=1" --status 200 --equals 'GET|/surface/layer/hello|one|z|1' --rheader "x-layer: one"
 check "http exposes query and cookies, and skips unmatched layers" GET /surface/plain --host shared.example --status 200 --equals 'GET|/surface/plain|none|-|-'
+check "http exposes a request AbortSignal" GET /surface/signal --host shared.example --status 200 --equals 'object|true|false'
 check "rewrite changes the path a later Caddy handler sees" GET /files/anything --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
 check "template sprig and pathEscape" GET /template/upper --host shared.example --status 200 --equals 'HELLO|a%20b'
 check "template placeholder resolves the request host" GET /template/placeholder --host shared.example --status 200 --equals 'shared.example'

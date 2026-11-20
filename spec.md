@@ -174,9 +174,11 @@ global object, and it is not the live Go configuration.
   imported files can leave the ESM root; the path is trusted input.
 - A reload reuses the running global worker VM, so module state, timers, and
   ports survive `config.apply()`. Site VMs are reused when the site's root,
-  memory limit, and queue size are unchanged; a changed script loads a new
-  module into the same VM. A changed VM option or a removed site closes the VM
-  when the last handler releases it.
+  memory limit, and queue size are unchanged and no loaded module was edited;
+  the allowlists are refreshed in the reused VM, and a changed script loads a
+  new module into the same VM. An edited module or a changed VM option
+  provisions a fresh VM, and a removed site closes its VM when the last handler
+  releases it.
 - A reload is a normal config load. Caddy provisions the new generation before
   cleaning up the old one, so the new handlers adopt the VM before the old
   handlers release it.
@@ -281,7 +283,10 @@ table at dispatch.
 - `setTimeout`, `setInterval`, `queueMicrotask`, and promises are provided by
   `stdlib.Loop` and the engine's job queue.
 - `fetch` comes from `stdlib.Fetch`, gated by `fetch_allow`, with a response
-  body limit. No `fetch` without the capability.
+  body limit. No `fetch` without the capability. A fetch issued during a
+  dispatch inherits the request's `AbortSignal` through the runtime's async
+  context, so a disconnect or deadline cancels it with no explicit signal; a
+  signal the script passes wins.
 - `fs` comes from `stdlib.FS`, confined to `root` with `os.Root` semantics and
   optional read-only mode.
 - `watch(dir, fn)` uses `fsnotify` on the VM's goroutine. Callbacks are posted
@@ -323,9 +328,10 @@ Use go-quickjs's real messaging, not a handwritten clone:
   loader, and the options. `Workers.Max` bounds concurrency.
 - Ports keep a loop alive until closed or `unref()`d. VM teardown closes every
   port and terminates workers.
-- `BroadcastChannel` is process-global by name. Names are prefixed with the
-  configuration generation so old and new VMs never exchange messages during a
-  reload.
+- `BroadcastChannel` is process-global by name, so each VM prefixes the name
+  with its own scope. A VM's workers inherit that prefix and can talk to their
+  parent, but two VMs, including an old and a new generation, never exchange
+  messages. The script still reads the unprefixed name.
 - Host objects (`http`, `request`, `server`, functions) do not cross a port.
   Only plain data, ports, `ArrayBuffer`, `Blob`, and `DOMException` do. Send a
   snapshot, not a live object.
@@ -407,11 +413,13 @@ Therefore:
 - `javascript.go` at the repository root is the only Go file there. It blank
   imports the packages so their `init` registrations run.
 - `pkg/config`: options, Caddyfile parsing, validation.
-- `pkg/vm`: runtime construction, loop, entry evaluation, and the worker `config` object.
-- `pkg/bridge`: `http`, request, response, headers, cookies, fetch, fs, timers.
+- `pkg/vm`: runtime construction, loop, entry evaluation, the sandbox module
+  loader, the per-request `http` object, request and response helpers, streams
+  and WebSocket upgrades, timers, fetch, fs, `watch()`, messaging, workers,
+  events, metrics, and the worker `config` object.
 - `pkg/template`: the `_` registry and typed conversion.
-- `pkg/worker`: messaging, ports, events, worker construction.
-- `pkg/handler`: the HTTP handler and the global app.
+- `pkg/handler`: the HTTP handler, the global app, the site VM pool, and the
+  admin reload path.
 - Tests live next to their package. End-to-end assets live under `test/`.
 - The shipped image config lives under `www/`.
 
@@ -453,14 +461,16 @@ Substring checks are not a substitute for exact bytes.
 The configuration surface, one go-quickjs VM per site, ESM
 evaluation with a sandboxed loader, a per-request `http` (request facts,
 `headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
-`respond`, `stream`, `sse`, and `websocket`), `route()` layers, timeouts,
+`respond`, `stream`, `sse`, `websocket`, and `signal`), `route()` layers,
+timeouts,
 memory limits, queue
 admission, VM reuse across reloads when the VM options are unchanged, the
 global worker's mutable `config` object with `config.apply()` and
 `config.caddyfile()`, the `_` template registry, `fs`, allowlisted `fetch`,
 `env_allow`, `structuredClone`, messaging, workers, `watch()`, and Caddy
 events in the global worker are implemented, along with automatic reload on
-entry-module changes and copy-on-edit VM replacement, a per-request callback
-budget, shutdown draining, sandbox and concurrency tests, and per-VM counters
-with structured logs. Chunked responses, SSE, and WebSocket upgrades are also
+entry-module changes and copy-on-edit VM replacement, request-scoped signals
+that also cancel fetches through the runtime's async context, a per-request
+callback budget, shutdown draining, sandbox and concurrency tests, and per-VM
+counters with structured logs. Chunked responses, SSE, and WebSocket upgrades are also
 implemented.

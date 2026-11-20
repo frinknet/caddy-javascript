@@ -39,7 +39,7 @@ configuration, and a rejected edit leaves the previous generation serving.
 - Each request gets a fresh `http` object with `method`, `url`, `path`,
   `query`, `headers`, `cookies`, `body`
   (`text`/`json`/`bytes`, bounded at 1 MiB), `host`, `remote`, `protocol`,
-  `vars`, `rewrite`, `respond`, `stream`, `sse`, and `websocket`.
+  `vars`, `rewrite`, `respond`, `stream`, `sse`, `websocket`, and `signal`.
 - During a dispatch the global space is the request's Caddy placeholder space.
   Reading a bare identifier resolves a `map` destination or any other
   placeholder (`site`, `host`, `method`, `path`); it never reads a variable.
@@ -125,6 +125,13 @@ configuration, and a rejected edit leaves the previous generation serving.
 - `respond` writes the status, headers, and body. A handler that returns without
   responding calls the next Caddy handler; use `respond(404, ...)` to answer
   404 explicitly.
+- `http.signal` is the request's `AbortSignal`. It aborts when the client
+  disconnects, the handler deadline ends, or the request finishes, so async work
+  can stop instead of outliving the request. The signal is tied to the dispatch
+  through the runtime's async context, so it still applies after `await` and
+  inside timers started by that dispatch. `fetch()` uses it automatically: a
+  call with no `signal` option is cancelled with the request, and a signal the
+  script passes itself takes precedence.
 - `http.stream(status, headers)` starts a chunked response and returns a writer
   with `write(chunk)`, `end(chunk?)`, and `close()`. Every chunk is flushed, so
   a client sees it immediately. The writer stays usable after the dispatch
@@ -170,7 +177,9 @@ configuration, and a rejected edit leaves the previous generation serving.
   when the VM closes or its module is replaced.
 - `fetch` is installed only when `fetch_allow` is non-empty. Every request,
   including each redirect, is checked against the allowlist; response bodies
-  are capped at 1 MiB. `_.httpInclude` and `_.getHostByName` use the same list.
+  are capped at 1 MiB. A fetch issued during a dispatch inherits
+  `http.signal`, so a disconnect or deadline cancels it even without an explicit
+  signal; `_.httpInclude` and `_.getHostByName` use the same list.
 - `structuredClone`, `MessageChannel`, `MessagePort`, and `BroadcastChannel`
   are installed. Broadcast names are scoped to the VM, so an old and a new
   generation never exchange messages, and a script still reads the name it
