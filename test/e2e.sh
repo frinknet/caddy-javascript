@@ -71,6 +71,15 @@ http://shared.example:80 {
 	}
 }
 
+http://allow.example:80 {
+	handle /template/* {
+		javascript /app/template-allow.js {
+			env_allow TEMPLATE_TEST
+			fetch_allow 127.0.0.1
+		}
+	}
+}
+
 http://vars.example:80 {
 	map {host} {site} {
 		~^(.+?)\.\d{1,3}(?:[.-]\d{1,3}){3}\.(?:nip|sslip)\.io(?::\d+)?$ ${1}
@@ -116,6 +125,7 @@ if ! docker run -d \
 	-v "$TMP/Caddyfile:/etc/caddy/Caddyfile:ro" \
 	-v "$TMP:/test:ro" \
 	-v "$TMP/app:/app" \
+	-e TEMPLATE_TEST=allowed \
 	-p "127.0.0.1:$PORT:80" \
 	"$IMAGE" run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
 	echo "failed to start container from $IMAGE" >&2
@@ -253,8 +263,31 @@ check "handle directives share the site realm and module cache" GET /api/two --h
 check "route layers set request headers" GET "/surface/layer/hello?q=z" --host shared.example --cookie "c=1" --status 200 --equals 'GET|/surface/layer/hello|one|z|1' --rheader "x-layer: one"
 check "http exposes query and cookies, and skips unmatched layers" GET /surface/plain --host shared.example --status 200 --equals 'GET|/surface/plain|none|-|-'
 check "rewrite changes the path a later Caddy handler sees" GET /files/anything --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
-check "template functions are exposed as _" GET /template/x --host shared.example --status 200 --equals 'HELLO|a%20b'
-check "env is denied without env_allow" GET /template/env --host shared.example --status 500
+check "template sprig and pathEscape" GET /template/upper --host shared.example --status 200 --equals 'HELLO|a%20b'
+check "template placeholder resolves the request host" GET /template/placeholder --host shared.example --status 200 --equals 'shared.example'
+check "template readFile reads the sandbox" GET /template/read --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
+check "template fileExists distinguishes files" GET /template/exists --host shared.example --status 200 --equals 'true|false'
+check "template listFiles lists the sandbox" GET /template/list --host shared.example --status 200 --equals 'yes'
+check "template fileStat reports the file" GET /template/stat --host shared.example --status 200 --equals "lib.js|$(wc -c < test/app/lib.js | tr -d ' ')|false"
+check "template humanize formats a size" GET /template/humanize --host shared.example --status 200 --equals '2.0 MB'
+check "template splitFrontMatter splits metadata and body" GET /template/frontmatter --host shared.example --status 200 --equals 'Hi|Body'
+check "template stripHTML" GET /template/html --host shared.example --status 200 --equals 'hi'
+check "template markdown" GET /template/markdown --host shared.example --status 200 --equals '<h1>hi</h1>'
+check "template httpStatus" GET /template/status --host shared.example --status 200 --equals 'Not Found'
+check "template httpError sets the status" GET /template/error --host shared.example --status 404
+check "template Date to time.Time" GET /template/epoch --host shared.example --status 200 --equals '1577923200'
+check "template time.Time to RFC3339" GET /template/date --host shared.example --status 200 --equals '2020-01-02T00:00:00Z'
+check "template include renders a request template" GET /template/include --host shared.example --status 200 --equals 'shared.example|shared.example'
+check "template env is denied without env_allow" GET /template/env --host shared.example --status 500
+check "template expandenv is denied without env_allow" GET /template/expandenv --host shared.example --status 500
+check "template getHostByName is denied without fetch_allow" GET /template/dns --host shared.example --status 500
+check "template httpInclude is denied without fetch_allow" GET /template/httpinclude --host shared.example --status 500
+check "template readFile cannot escape the sandbox" GET /template/escape --host shared.example --status 500
+
+check "template env is allowed by env_allow" GET /template/env --host allow.example --status 200 --equals 'allowed'
+check "template expandenv is allowed by env_allow" GET /template/expandenv --host allow.example --status 200 --equals 'allowed'
+check "template getHostByName is allowed by fetch_allow" GET /template/dns --host allow.example --status 200 --equals '127.0.0.1'
+check "template httpInclude is allowed by fetch_allow" GET /template/httpinclude --host allow.example --status 200 --equals 'GET /anything'
 
 check "bare globals and http.vars stay separate" GET /vars/page.html --host vars.example --status 200 --equals 'site=vars.example! host=vars.example caddy=mapped bare_site=vars.example! bare_fresh=new vars_explicit=new vars_fresh=[]'
 

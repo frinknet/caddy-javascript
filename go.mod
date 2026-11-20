@@ -3,11 +3,14 @@ module github.com/frinknet/caddy-javascript
 go 1.26.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/caddyserver/caddy/v2 v2.11.9
+	github.com/dustin/go-humanize v1.1.0
 	github.com/go-quickjs/go-quickjs v0.40.0
 	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -43,7 +46,6 @@ require (
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dunglas/go-urlpattern v1.0.0 // indirect
 	github.com/dunglas/httpsfv v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.6 // indirect

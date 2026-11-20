@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/frinknet/caddy-javascript/pkg/config"
+	"github.com/frinknet/caddy-javascript/pkg/template"
 	"github.com/frinknet/caddy-javascript/pkg/vm"
 )
 
@@ -184,6 +185,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 
 	if site, ok := h.bindSite(ctx); ok {
+		funcs, err := templateFuncs(ctx, site.route)
+		if err != nil {
+			site.gen.discard(site.srv)
+			return err
+		}
+		cfg.TemplateFuncs = funcs
 		provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
 		defer cancel()
 		v, key, err := acquireSite(provisionCtx, site, cfg)
@@ -253,7 +260,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			return r.Context().Err()
 		}
 		status := http.StatusInternalServerError
+		var httpErr *template.HTTPError
 		switch {
+		case errors.As(err, &httpErr):
+			status = httpErr.Status
 		case errors.Is(err, vm.ErrQueueFull), errors.Is(err, vm.ErrClosed):
 			status = http.StatusServiceUnavailable
 		case errors.Is(err, context.DeadlineExceeded):

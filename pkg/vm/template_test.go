@@ -44,3 +44,32 @@ func TestTemplateEnvDenied(t *testing.T) {
 		t.Fatal("env was allowed without env_allow")
 	}
 }
+
+func TestTemplateFuncs(t *testing.T) {
+	dir := t.TempDir()
+	entry := writeModule(t, dir, "main.js", `export default function handler(http) {
+	http.respond(200, {}, String(_.double(21)) + "|" + _.upper("site"))
+}
+`)
+	v, err := New(Config{
+		ScriptPath:     entry,
+		RootDir:        dir,
+		RequireHandler: true,
+		TemplateFuncs: map[string]any{
+			"double": func(n int) int { return n * 2 },
+			"upper":  func(s string) string { return "site:" + s },
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	resp, err := v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if resp == nil || string(resp.Body) != "42|site:site" {
+		t.Fatalf("body = %q", resp.Body)
+	}
+}

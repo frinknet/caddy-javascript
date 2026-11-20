@@ -35,6 +35,7 @@ type siteRef struct {
 	key      string
 	identity string
 	pool     string
+	route    *caddyhttp.Route
 }
 
 func (g *generation) nextOrdinal() int {
@@ -87,12 +88,12 @@ func (h *Handler) bindSite(ctx caddy.Context) (siteRef, bool) {
 	ordinal := gen.nextOrdinal()
 
 	var key, identity string
+	route, index, found := handlerRoute(srv, ordinal)
 	if h.Site != "" {
 		key = "site:" + h.Site
 		identity = key
 	} else {
-		route, index, ok := handlerRoute(srv, ordinal)
-		if !ok {
+		if !found {
 			return siteRef{}, false
 		}
 		if hostKey, ok := routeHostKey(route); ok {
@@ -103,8 +104,11 @@ func (h *Handler) bindSite(ctx caddy.Context) (siteRef, bool) {
 			identity = routeIdentity(route, h.script)
 		}
 	}
+	if !found {
+		route = nil
+	}
 
-	return siteRef{srv: srv, gen: gen, key: key, identity: identity}, true
+	return siteRef{srv: srv, gen: gen, key: key, identity: identity, route: route}, true
 }
 
 // routeIdentity keeps a hostless site's VM stable when a mount shifts its

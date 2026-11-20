@@ -43,6 +43,7 @@ type Config struct {
 	Caddy            *CaddyConfig
 	EnvAllow         []string
 	FetchAllow       []string
+	TemplateFuncs    map[string]any
 }
 
 // Request is one dispatch into the VM. Req carries the live request: scripts
@@ -81,6 +82,7 @@ type VM struct {
 	headerFactory quickjs.Value
 	active        *requestState
 	registry      *template.Registry
+	templateFuncs map[string]any
 	envAllow      []string
 	fetchAllow    []string
 
@@ -193,6 +195,7 @@ func New(cfg Config) (*VM, error) {
 		logger:         cfg.Logger,
 		envAllow:       cfg.EnvAllow,
 		fetchAllow:     cfg.FetchAllow,
+		templateFuncs:  cfg.TemplateFuncs,
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
 
@@ -402,9 +405,12 @@ func portableError(err error) error {
 		return context.Canceled
 	case errors.Is(err, ErrClosed):
 		return ErrClosed
-	default:
-		return errors.New(err.Error())
 	}
+	var httpErr *template.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr
+	}
+	return errors.New(err.Error())
 }
 
 func (v *VM) Load(ctx context.Context, scriptPath string) error {
@@ -451,6 +457,11 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 	v.loop.Post(func() {
 		v.envAllow = cfg.EnvAllow
 		v.fetchAllow = cfg.FetchAllow
+		v.templateFuncs = cfg.TemplateFuncs
+		if err := v.installTemplate(); err != nil {
+			ch <- fmt.Errorf("javascript: install template: %w", err)
+			return
+		}
 		if err := v.configureConfig(cfg.Caddy); err != nil {
 			ch <- fmt.Errorf("javascript: install config: %w", err)
 			return

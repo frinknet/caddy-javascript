@@ -69,14 +69,21 @@ implemented yet.
   matcher receives `http`.
 - `_` is a global object of template functions. It exposes the sprig function
   map plus mirrored Caddy built-ins (`include`, `httpInclude`, `placeholder`,
-  `ph`, `readFile`, `fileExists`, `listFiles`, `stripHTML`, `markdown`,
-  `pathEscape`, `httpError`, `httpStatus`, `env`, `expandenv`, and
-  `getHostByName`). Functions that need a request (`include`, `httpInclude`,
-  `placeholder`, `ph`, `httpError`, and the file helpers) throw without one.
-  `env` and `expandenv` require `env_allow`; `httpInclude` and
-  `getHostByName` require `fetch_allow`. File helpers read the sandbox root.
-  `time.Duration` accepts a duration string or nanoseconds; `time.Time`
-  accepts a Date or RFC 3339.
+  `ph`, `readFile`, `fileExists`, `fileStat`, `listFiles`, `stripHTML`,
+  `markdown`, `splitFrontMatter`, `humanize`, `pathEscape`, `httpError`,
+  `httpStatus`, `env`, `expandenv`, and `getHostByName`). Functions that need a
+  request (`include`, `httpInclude`, `placeholder`, `ph`, `httpError`, and the
+  file helpers) throw without one. `env` and `expandenv` require `env_allow`;
+  `httpInclude` and `getHostByName` require `fetch_allow`. File helpers read the
+  sandbox root. `fileStat` returns `{Name, Size, Mode, ModTime, IsDir}` with an
+  RFC 3339 mod time. `splitFrontMatter` returns `{Meta, Body}`. `humanize`
+  accepts `size` and `time[:layout]` formats. `time.Duration` accepts a duration
+  string or nanoseconds; `time.Time` accepts a Date or RFC 3339.
+- A site's `templates` extensions are also exposed on `_`. Functions declared
+  under `templates { extensions { ... } }` in the same site are loaded into the
+  registry, so a script and a template call the same implementation. The
+  extension modules are provisioned a second time for the VM; keep them free of
+  per-process side effects.
 - `config` is the global worker's copy of the whole Caddy configuration, plus
   `config.apply()` and `config.caddyfile(path)`. Site VMs have no `config`
   object. The worker seeds `config` from the admin endpoint once Caddy is

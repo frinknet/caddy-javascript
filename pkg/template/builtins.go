@@ -2,6 +2,7 @@ package template
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,11 +12,17 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
+	"time"
+	"unicode"
 
+	"github.com/BurntSushi/toml"
 	"github.com/Masterminds/sprig/v3"
+	"github.com/dustin/go-humanize"
 	"github.com/yuin/goldmark"
+	"gopkg.in/yaml.v3"
 )
 
 var deniedSprig = map[string]bool{
@@ -55,9 +62,12 @@ func (r *Registry) AddCaddyBuiltins(host Host) error {
 		{"getHostByName", b.getHostByName, false},
 		{"readFile", b.readFile, true},
 		{"fileExists", b.fileExists, true},
+		{"fileStat", b.fileStat, true},
 		{"listFiles", b.listFiles, true},
 		{"stripHTML", b.stripHTML, false},
 		{"markdown", b.markdown, false},
+		{"splitFrontMatter", b.splitFrontMatter, false},
+		{"humanize", b.humanize, false},
 		{"pathEscape", url.PathEscape, false},
 		{"httpError", b.httpError, true},
 		{"httpStatus", b.httpStatus, false},
@@ -152,6 +162,24 @@ func (b *builtins) fileExists(name string) (bool, error) {
 	return true, nil
 }
 
+func (b *builtins) fileStat(name string) (FileInfo, error) {
+	req := b.host.Request()
+	if req == nil {
+		return FileInfo{}, errors.New("javascript: fileStat requires a request")
+	}
+	info, err := b.stat(name)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	return FileInfo{
+		Name:    info.Name(),
+		Size:    info.Size(),
+		Mode:    info.Mode().String(),
+		ModTime: info.ModTime().Format(time.RFC3339),
+		IsDir:   info.IsDir(),
+	}, nil
+}
+
 func (b *builtins) listFiles(name string) ([]string, error) {
 	req := b.host.Request()
 	if req == nil {
@@ -183,10 +211,41 @@ func (b *builtins) stripHTML(s string) string {
 
 func (b *builtins) markdown(input any) (string, error) {
 	var buf bytes.Buffer
-	if err := goldmark.Convert([]byte(fmt.Sprint(input)), &buf); err != nil {
+	if err := goldmark.Convert([]byte(stringValue(input)), &buf); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func (b *builtins) splitFrontMatter(input any) (FrontMatter, error) {
+	meta, body, err := extractFrontMatter(stringValue(input))
+	if err != nil {
+		return FrontMatter{}, err
+	}
+	return FrontMatter{Meta: meta, Body: body}, nil
+}
+
+func (b *builtins) humanize(formatType, data string) (string, error) {
+	parts := strings.SplitN(formatType, ":", 2)
+	switch parts[0] {
+	case "size":
+		n, err := strconv.ParseUint(data, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("humanize: size cannot be parsed: %w", err)
+		}
+		return humanize.Bytes(n), nil
+	case "time":
+		layout := time.RFC1123Z
+		if len(parts) > 1 {
+			layout = parts[1]
+		}
+		t, err := time.Parse(layout, data)
+		if err != nil {
+			return "", fmt.Errorf("humanize: time cannot be parsed: %w", err)
+		}
+		return humanize.Time(t), nil
+	}
+	return "", fmt.Errorf("humanize: unknown format %q", parts[0])
 }
 
 func (b *builtins) httpError(status int) error {
@@ -278,6 +337,23 @@ func (b *builtins) stat(name string) (os.FileInfo, error) {
 	return f.Stat()
 }
 
+// FileInfo is the plain value fileStat returns to JavaScript. The mod time is
+// formatted as RFC 3339 because a time.Time does not cross the boundary.
+type FileInfo struct {
+	Name    string
+	Size    int64
+	Mode    string
+	ModTime string
+	IsDir   bool
+}
+
+// FrontMatter is the split result of splitFrontMatter: the parsed metadata and
+// the body after the closing fence.
+type FrontMatter struct {
+	Meta map[string]any
+	Body string
+}
+
 // HTTPError is returned by httpError so the handler can translate it to a
 // status code.
 type HTTPError struct {
@@ -296,9 +372,125 @@ func stripHTMLTags(s string) string {
 	return htmlTagPattern.ReplaceAllString(s, "")
 }
 
+func stringValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	default:
+		return fmt.Sprint(x)
+	}
+}
+
+type frontMatterType struct {
+	fenceOpen  string
+	fenceClose []string
+	parse      func([]byte) (map[string]any, error)
+}
+
+var supportedFrontMatterTypes = []frontMatterType{
+	{
+		fenceOpen:  "---",
+		fenceClose: []string{"---", "..."},
+		parse:      yamlFrontMatter,
+	},
+	{
+		fenceOpen:  "+++",
+		fenceClose: []string{"+++"},
+		parse:      tomlFrontMatter,
+	},
+	{
+		fenceOpen:  "{",
+		fenceClose: []string{"}"},
+		parse:      jsonFrontMatter,
+	},
+}
+
+func extractFrontMatter(input string) (map[string]any, string, error) {
+	var firstLineStart, firstLineEnd int
+	lineEmpty := true
+	for i, b := range input {
+		if b == '\n' {
+			firstLineStart = firstLineEnd
+			if firstLineStart > 0 {
+				firstLineStart++
+			}
+			firstLineEnd = i
+			if !lineEmpty {
+				break
+			}
+			continue
+		}
+		lineEmpty = lineEmpty && unicode.IsSpace(b)
+	}
+	firstLine := strings.TrimSpace(input[firstLineStart:firstLineEnd])
+
+	var closingFence []string
+	var parse func([]byte) (map[string]any, error)
+	for _, fmType := range supportedFrontMatterTypes {
+		if firstLine == fmType.fenceOpen {
+			closingFence = fmType.fenceClose
+			parse = fmType.parse
+			break
+		}
+	}
+	if parse == nil {
+		return nil, input, nil
+	}
+
+	var fmEndFence string
+	fmEndFenceStart := -1
+	for _, fence := range closingFence {
+		index := strings.Index(input[firstLineEnd:], "\n"+fence)
+		if index >= 0 && (fmEndFenceStart < 0 || index < fmEndFenceStart) {
+			fmEndFenceStart = index
+			fmEndFence = fence
+		}
+	}
+	if fmEndFenceStart < 0 {
+		return nil, "", errors.New("unterminated front matter")
+	}
+	fmEndFenceStart += firstLineEnd + 1
+
+	frontMatter := input[firstLineEnd:fmEndFenceStart]
+	meta, err := parse([]byte(frontMatter))
+	if err != nil {
+		return nil, "", err
+	}
+	body := input[fmEndFenceStart+len(fmEndFence):]
+	return meta, body, nil
+}
+
+func yamlFrontMatter(input []byte) (map[string]any, error) {
+	m := make(map[string]any)
+	err := yaml.Unmarshal(input, &m)
+	return m, err
+}
+
+func tomlFrontMatter(input []byte) (map[string]any, error) {
+	m := make(map[string]any)
+	err := toml.Unmarshal(input, &m)
+	return m, err
+}
+
+func jsonFrontMatter(input []byte) (map[string]any, error) {
+	input = append([]byte{'{'}, input...)
+	input = append(input, '}')
+	m := make(map[string]any)
+	err := json.Unmarshal(input, &m)
+	return m, err
+}
+
 func cleanSandboxName(name string) string {
 	cleaned := path.Clean("/" + strings.TrimPrefix(name, "/"))
-	return strings.TrimPrefix(cleaned, "/")
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" {
+		return "."
+	}
+	return cleaned
 }
 
 // FuncMap returns the registry as a Go template function map. It is used by

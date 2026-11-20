@@ -51,6 +51,22 @@ func (r *Registry) Add(name string, fn any, requestBound bool) error {
 	return nil
 }
 
+// Set registers a function, replacing one with the same name. Site template
+// extensions are applied last so they can shadow a built-in.
+func (r *Registry) Set(name string, fn any, requestBound bool) error {
+	value := reflect.ValueOf(fn)
+	if value.Kind() != reflect.Func {
+		return fmt.Errorf("javascript: template function %q is not a function", name)
+	}
+	r.funcs[name] = value
+	if requestBound {
+		r.requestBound[name] = true
+	} else {
+		delete(r.requestBound, name)
+	}
+	return nil
+}
+
 // Names returns the registered function names.
 func (r *Registry) Names() []string {
 	names := make([]string, 0, len(r.funcs))

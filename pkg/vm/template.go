@@ -70,6 +70,11 @@ func (v *VM) installTemplate() error {
 	if err := reg.AddCaddyBuiltins(v); err != nil {
 		return err
 	}
+	for name, fn := range v.templateFuncs {
+		if err := reg.Set(name, fn, false); err != nil {
+			return err
+		}
+	}
 	v.registry = reg
 
 	obj := v.rt.NewObject()
