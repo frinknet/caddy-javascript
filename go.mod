@@ -3,8 +3,10 @@ module github.com/frinknet/caddy-javascript
 go 1.26.0
 
 require (
+	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/caddyserver/caddy/v2 v2.11.9
 	github.com/go-quickjs/go-quickjs v0.40.0
+	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0
 )
 
@@ -21,7 +23,6 @@ require (
 	github.com/KimMachineGun/automemlimit v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
-	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/aryann/difflib v0.0.0-20210328193216-ff5ff6dc229b // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

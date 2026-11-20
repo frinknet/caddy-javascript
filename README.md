@@ -8,12 +8,12 @@ Run ESM JavaScript inside Caddy as a native runtime. The target design is in
 directives and its `handle` directives share that VM's realm, module cache, and
 entry modules. A configuration reload reuses the site VM when its `root`,
 `memory`, and `queue_size` are unchanged, so a route or mount edit keeps module
-state. The
+state; `env_allow` and `fetch_allow` are refreshed in the reused VM. The
 global option evaluates a worker entry but does not dispatch requests. The
 `http` object carries the request and its helpers, `route()` registers
 JavaScript layers, and the global worker owns `config`, the whole Caddy
-configuration. Workers, messaging, `_`, events, fetch, and filesystem access
-are not implemented yet.
+configuration. Workers, messaging, events, fetch, and filesystem access are not
+implemented yet.
 
 ## What works today
 
@@ -67,6 +67,16 @@ are not implemented yet.
   responds stops the chain, so the default export does not run. A string
   matcher matches a path exactly, or a prefix when it ends in `*`; a function
   matcher receives `http`.
+- `_` is a global object of template functions. It exposes the sprig function
+  map plus mirrored Caddy built-ins (`include`, `httpInclude`, `placeholder`,
+  `ph`, `readFile`, `fileExists`, `listFiles`, `stripHTML`, `markdown`,
+  `pathEscape`, `httpError`, `httpStatus`, `env`, `expandenv`, and
+  `getHostByName`). Functions that need a request (`include`, `httpInclude`,
+  `placeholder`, `ph`, `httpError`, and the file helpers) throw without one.
+  `env` and `expandenv` require `env_allow`; `httpInclude` and
+  `getHostByName` require `fetch_allow`. File helpers read the sandbox root.
+  `time.Duration` accepts a duration string or nanoseconds; `time.Time`
+  accepts a Date or RFC 3339.
 - `config` is the global worker's copy of the whole Caddy configuration, plus
   `config.apply()` and `config.caddyfile(path)`. Site VMs have no `config`
   object. The worker seeds `config` from the admin endpoint once Caddy is
@@ -127,8 +137,9 @@ setTimeout(() => {
 }, 1000)
 ```
 
-Parsed but not active yet: `env_allow`, `fetch_allow`, and `watch`.
-`site`, `root`, `timeout`, `memory`, and `queue_size` are active.
+Parsed but not active yet: `watch`.
+`site`, `root`, `timeout`, `memory`, `queue_size`, `env_allow`, and
+`fetch_allow` are active.
 
 ## Caddyfile
 
@@ -159,8 +170,8 @@ Options are available on both the global option and the directive:
 | `timeout <duration>` | Deadline for one handler call. | `3s` |
 | `memory <bytes>` | Per-VM memory limit. | `64MiB` |
 | `queue_size <n>` | Per-VM admission queue. | `256` |
-| `env_allow <names...>` | Environment allowlist. Parsed, not active yet. | empty |
-| `fetch_allow <hosts...>` | Outbound host allowlist. Parsed, not active yet. | empty |
+| `env_allow <names...>` | Environment names visible to `_`. | empty |
+| `fetch_allow <hosts...>` | Outbound hosts for `_.httpInclude` and `_.getHostByName`. | empty |
 | `watch [true\|false]` | Reload on module-tree changes. Parsed, not active yet. | `true` |
 
 ```caddyfile
@@ -192,7 +203,7 @@ export default function handler(http) {
 
 Timers are installed. Handlers and route layers must finish synchronously: a
 promise returned by a handler is not awaited, and a script that responds after
-the dispatch has returned gets an error. `_`, `fetch`, `fs`, workers,
+the dispatch has returned gets an error. `fetch`, `fs`, workers,
 `MessageChannel`, and Caddy events are not available yet.
 
 ## JSON configuration

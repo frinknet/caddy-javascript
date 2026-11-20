@@ -66,6 +66,9 @@ http://shared.example:80 {
 			root /app
 		}
 	}
+	handle /template/* {
+		javascript /app/template.js
+	}
 }
 
 http://vars.example:80 {
@@ -250,6 +253,8 @@ check "handle directives share the site realm and module cache" GET /api/two --h
 check "route layers set request headers" GET "/surface/layer/hello?q=z" --host shared.example --cookie "c=1" --status 200 --equals 'GET|/surface/layer/hello|one|z|1' --rheader "x-layer: one"
 check "http exposes query and cookies, and skips unmatched layers" GET /surface/plain --host shared.example --status 200 --equals 'GET|/surface/plain|none|-|-'
 check "rewrite changes the path a later Caddy handler sees" GET /files/anything --host shared.example --status 200 --equals "$(cat test/app/lib.js)"
+check "template functions are exposed as _" GET /template/x --host shared.example --status 200 --equals 'HELLO|a%20b'
+check "env is denied without env_allow" GET /template/env --host shared.example --status 500
 
 check "bare globals and http.vars stay separate" GET /vars/page.html --host vars.example --status 200 --equals 'site=vars.example! host=vars.example caddy=mapped bare_site=vars.example! bare_fresh=new vars_explicit=new vars_fresh=[]'
 

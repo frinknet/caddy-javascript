@@ -65,6 +65,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 		RequireHandler: false,
 		Logger:         a.logger,
 		Caddy:          &vm.CaddyConfig{Apply: applyCaddyConfig},
+		EnvAllow:       a.EnvAllow,
+		FetchAllow:     a.FetchAllow,
 	}
 	provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
 	defer cancel()
@@ -177,6 +179,8 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		RequireHandler:   true,
 		ProvisionTimeout: vm.DefaultProvisionTimeout,
 		Logger:           h.logger,
+		EnvAllow:         h.EnvAllow,
+		FetchAllow:       h.FetchAllow,
 	}
 
 	if site, ok := h.bindSite(ctx); ok {

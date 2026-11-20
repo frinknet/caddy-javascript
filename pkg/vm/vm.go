@@ -16,6 +16,8 @@ import (
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/stdlib"
 	"go.uber.org/zap"
+
+	"github.com/frinknet/caddy-javascript/pkg/template"
 )
 
 const (
@@ -39,6 +41,8 @@ type Config struct {
 	ProvisionTimeout time.Duration
 	Logger           *zap.Logger
 	Caddy            *CaddyConfig
+	EnvAllow         []string
+	FetchAllow       []string
 }
 
 // Request is one dispatch into the VM. Req carries the live request: scripts
@@ -76,6 +80,9 @@ type VM struct {
 	varsFactory   quickjs.Value
 	headerFactory quickjs.Value
 	active        *requestState
+	registry      *template.Registry
+	envAllow      []string
+	fetchAllow    []string
 
 	config     quickjs.Value
 	stringify  quickjs.Value
@@ -184,6 +191,8 @@ func New(cfg Config) (*VM, error) {
 		closed:         make(chan struct{}),
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
+		envAllow:       cfg.EnvAllow,
+		fetchAllow:     cfg.FetchAllow,
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
 
@@ -220,6 +229,10 @@ func New(cfg Config) (*VM, error) {
 	if err := v.configureConfig(cfg.Caddy); err != nil {
 		v.cleanupNew()
 		return nil, fmt.Errorf("javascript: install config: %w", err)
+	}
+	if err := v.installTemplate(); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install template: %w", err)
 	}
 
 	v.currentScript = script
@@ -436,6 +449,8 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 
 	ch := make(chan error, 1)
 	v.loop.Post(func() {
+		v.envAllow = cfg.EnvAllow
+		v.fetchAllow = cfg.FetchAllow
 		if err := v.configureConfig(cfg.Caddy); err != nil {
 			ch <- fmt.Errorf("javascript: install config: %w", err)
 			return
