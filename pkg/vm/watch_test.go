@@ -43,6 +43,31 @@ stop = watch("/watched", (names) => {
 	}
 }
 
+func TestWatchDebouncesABurst(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "watched"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := writeModule(t, dir, "main.js", `import fs from "fs"
+watch("/watched", (names) => {
+	fs.writeFileSync("/seen.txt", names.join(","))
+})
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	if err := os.WriteFile(filepath.Join(dir, "watched", "one.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "watched", "two.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, filepath.Join(dir, "seen.txt"), "/watched/one.txt,/watched/two.txt")
+}
+
 func TestWatchRejectsPathsOutsideTheRoot(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "root")

@@ -18,7 +18,15 @@ import (
 // asks for more fails instead of buffering it.
 const DefaultMaxBody = int64(1 << 20)
 
-var errRequestFinished = errors.New("javascript: request is finished")
+// DefaultMaxCallbacks bounds the host callbacks one request may make. The
+// engine's own microtask queue is unbounded, so the host caps the work a
+// request can hand back to Go.
+const DefaultMaxCallbacks = 10000
+
+var (
+	errRequestFinished = errors.New("javascript: request is finished")
+	errCallbackBudget  = errors.New("javascript: request callback budget exceeded")
+)
 
 // varsFactorySource builds the http.vars proxy. The Go callbacks are bound to
 // one request, so each request gets its own proxy over the live variable table.
@@ -118,6 +126,8 @@ type requestState struct {
 	bodyRead bool
 	bodyErr  error
 	finished bool
+	calls    int
+	maxCalls int
 }
 
 func newRequestState(req Request, resp *response) (*requestState, error) {
@@ -132,14 +142,19 @@ func newRequestState(req Request, resp *response) (*requestState, error) {
 	if maxBody <= 0 {
 		maxBody = DefaultMaxBody
 	}
+	maxCalls := req.MaxCallbacks
+	if maxCalls <= 0 {
+		maxCalls = DefaultMaxCallbacks
+	}
 	return &requestState{
-		req:     req.Req,
-		resp:    resp,
-		vars:    vars,
-		lookup:  req.Lookup,
-		set:     req.Set,
-		delete:  req.Delete,
-		maxBody: maxBody,
+		req:      req.Req,
+		resp:     resp,
+		vars:     vars,
+		lookup:   req.Lookup,
+		set:      req.Set,
+		delete:   req.Delete,
+		maxBody:  maxBody,
+		maxCalls: maxCalls,
 	}, nil
 }
 
@@ -158,6 +173,10 @@ func (s *requestState) currentPath() string {
 func (s *requestState) checkLocked() error {
 	if s.finished {
 		return errRequestFinished
+	}
+	s.calls++
+	if s.calls > s.maxCalls {
+		return errCallbackBudget
 	}
 	return nil
 }

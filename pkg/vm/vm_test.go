@@ -110,6 +110,9 @@ func TestHandleTimeout(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Handle error = %v, want deadline exceeded", err)
 	}
+	if got := v.Stats().Timeouts; got != 1 {
+		t.Errorf("timeout counter = %d, want 1", got)
+	}
 
 	resp, err := v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/ok", nil))
 	if err != nil {

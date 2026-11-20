@@ -70,6 +70,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 		EnvAllow:       a.EnvAllow,
 		FetchAllow:     a.FetchAllow,
 		Events:         true,
+		Watch:          a.Watching(),
+		Reload:         autoReload,
 	}
 	provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
 	defer cancel()
@@ -237,6 +239,8 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		Logger:           h.logger,
 		EnvAllow:         h.EnvAllow,
 		FetchAllow:       h.FetchAllow,
+		Watch:            h.Watching(),
+		Reload:           autoReload,
 	}
 
 	if site, ok := h.bindSite(ctx); ok {
@@ -293,6 +297,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
+	start := time.Now()
 
 	vars, _ := r.Context().Value(caddyhttp.VarsCtxKey).(map[string]any)
 	var lookup func(string) (any, bool)
@@ -325,17 +330,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			status = http.StatusGatewayTimeout
 		}
 		if h.logger != nil {
-			h.logger.Error("javascript: handler error",
+			fields := []zap.Field{
 				zap.Error(err),
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
-			)
+				zap.Int("status", status),
+				zap.Int("queue_depth", h.vm.QueueDepth()),
+				zap.Duration("duration", time.Since(start)),
+			}
+			switch {
+			case errors.Is(err, vm.ErrQueueFull):
+				h.logger.Warn("javascript: queue full", fields...)
+			case errors.Is(err, vm.ErrClosed):
+				h.logger.Warn("javascript: runtime unavailable", fields...)
+			case errors.Is(err, context.DeadlineExceeded):
+				h.logger.Warn("javascript: handler timeout", fields...)
+			default:
+				h.logger.Error("javascript: handler error", fields...)
+			}
 		}
 		http.Error(w, http.StatusText(status), status)
 		return nil
 	}
 
 	if resp == nil {
+		if h.logger != nil {
+			h.logger.Debug("javascript: request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", 0),
+				zap.Int("queue_depth", h.vm.QueueDepth()),
+				zap.Duration("duration", time.Since(start)),
+			)
+		}
 		return next.ServeHTTP(w, r)
 	}
 
@@ -348,6 +375,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(resp.Body)
+	if h.logger != nil {
+		h.logger.Debug("javascript: request",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.Int("status", status),
+			zap.Int("queue_depth", h.vm.QueueDepth()),
+			zap.Duration("duration", time.Since(start)),
+		)
+	}
 	return nil
 }
 

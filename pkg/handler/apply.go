@@ -88,11 +88,21 @@ func readAdminConfig(timeout time.Duration) (map[string]any, error) {
 }
 
 func postAdminConfig(base string, body []byte) error {
+	return postAdminConfigForce(base, body, false)
+}
+
+// postAdminConfigForce loads a document through the admin endpoint. force
+// makes Caddy provision a new generation even when the JSON is byte-identical,
+// which is how an edited module file reaches a fresh VM.
+func postAdminConfigForce(base string, body []byte, force bool) error {
 	req, err := http.NewRequest(http.MethodPost, base+"/load", strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if force {
+		req.Header.Set("Cache-Control", "must-revalidate")
+	}
 	resp, err := adminClient(adminTimeout).Do(req)
 	if err != nil {
 		return fmt.Errorf("javascript: config.apply: %w", err)

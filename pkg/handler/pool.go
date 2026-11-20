@@ -11,47 +11,84 @@ import (
 )
 
 // Pools keep VMs alive across configuration generations. A reload adopts a
-// running VM instead of paying for a new realm and module evaluation.
+// running VM instead of paying for a new realm and module evaluation, unless a
+// module the VM loaded was edited; then the old VM stays with its generation
+// and a fresh VM takes the stable key, so an in-flight request is never moved
+// to a runtime that no longer matches.
 type vmPool struct {
 	sync.Mutex
 	entries map[string]*poolEntry
+	current map[string]string
+	seq     uint64
 }
 
 type poolEntry struct {
 	vm   *vm.VM
 	refs int
+	base string
 }
 
 var (
-	sitePool = vmPool{entries: make(map[string]*poolEntry)}
-	appPool  = vmPool{entries: make(map[string]*poolEntry)}
+	sitePool = newVMPool()
+	appPool  = newVMPool()
 )
 
-// acquire joins the pool for key or creates its VM and reports whether it
-// reused an existing one.
-func (p *vmPool) acquire(ctx context.Context, key string, cfg vm.Config) (*vm.VM, bool, error) {
+func newVMPool() vmPool {
+	return vmPool{
+		entries: make(map[string]*poolEntry),
+		current: make(map[string]string),
+	}
+}
+
+// acquire joins the pool under base or creates its VM. It returns the exact key
+// the caller must release, which differs from base once an edit replaced the
+// VM. reused reports whether an existing VM served the join.
+func (p *vmPool) acquire(ctx context.Context, base string, cfg vm.Config) (*vm.VM, string, bool, error) {
 	p.Lock()
 	defer p.Unlock()
 
-	if entry := p.entries[key]; entry != nil {
+	key := base
+	if current := p.current[base]; current != "" {
+		key = current
+	}
+	entry := p.entries[key]
+	if entry != nil && entry.vm.TreeChanged() {
+		key = p.nextKey(base)
+		p.current[base] = key
+		entry = nil
+	}
+
+	if entry != nil {
 		entry.refs++
 		if err := entry.vm.Join(ctx, cfg); err != nil {
 			entry.refs--
 			if entry.refs == 0 {
 				delete(p.entries, key)
+				if p.current[base] == key {
+					delete(p.current, base)
+				}
 				go entry.vm.Close()
 			}
-			return nil, false, err
+			return nil, key, false, err
 		}
-		return entry.vm, true, nil
+		return entry.vm, key, true, nil
 	}
 
 	v, err := vm.New(cfg)
 	if err != nil {
-		return nil, false, err
+		if p.current[base] == key {
+			delete(p.current, base)
+		}
+		return nil, key, false, err
 	}
-	p.entries[key] = &poolEntry{vm: v, refs: 1}
-	return v, false, nil
+	p.entries[key] = &poolEntry{vm: v, refs: 1, base: base}
+	p.current[base] = key
+	return v, key, false, nil
+}
+
+func (p *vmPool) nextKey(base string) string {
+	p.seq++
+	return fmt.Sprintf("%s#tree:%d", base, p.seq)
 }
 
 func (p *vmPool) release(key string) error {
@@ -70,6 +107,9 @@ func (p *vmPool) release(key string) error {
 		return nil
 	}
 	delete(p.entries, key)
+	if p.current[entry.base] == key {
+		delete(p.current, entry.base)
+	}
 	p.Unlock()
 
 	return entry.vm.Close()
@@ -79,8 +119,7 @@ func (p *vmPool) release(key string) error {
 // stable; a hostless site uses a matcher fingerprint so a mount that shifts
 // the route index does not replace the VM.
 func acquireSite(ctx context.Context, site siteRef, cfg vm.Config) (*vm.VM, string, error) {
-	key := sitePoolKey(site, cfg)
-	v, _, err := sitePool.acquire(ctx, key, cfg)
+	v, key, _, err := sitePool.acquire(ctx, sitePoolKey(site, cfg), cfg)
 	return v, key, err
 }
 
@@ -102,9 +141,7 @@ func sitePoolKey(site siteRef, cfg vm.Config) string {
 
 // acquireApp joins the pool for the global worker VM.
 func acquireApp(ctx context.Context, cfg vm.Config) (*vm.VM, string, bool, error) {
-	key := appPoolKey(cfg)
-	v, reused, err := appPool.acquire(ctx, key, cfg)
-	return v, key, reused, err
+	return appPool.acquire(ctx, appPoolKey(cfg), cfg)
 }
 
 func releaseApp(key string) error {

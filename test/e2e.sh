@@ -120,6 +120,14 @@ http://scope-b.example:80 {
 	javascript /app/scope-b.js
 }
 
+http://watch.example:80 {
+	javascript /app/reloadwatch.js
+}
+
+http://budget.example:80 {
+	javascript /app/budget.js
+}
+
 CADDY
 
 echo ""
@@ -434,6 +442,46 @@ else
 	echo "  FAIL: worker state after reload is $state"
 	FAIL=$((FAIL + 1))
 fi
+
+echo ""
+echo "=== Test 1c: module reload and backpressure ==="
+check "the watched module starts at v1" GET / --host watch.example --status 200 --equals 'watch:v1'
+
+cat >"$TMP/app/reloadwatch.js" <<'JS'
+export default function handler(http) {
+	http.respond(200, {}, "watch:v2")
+}
+JS
+wait_check "an edited entry module reloads itself" / --host watch.example --equals 'watch:v2'
+if docker logs "$CONTAINER_NAME" 2>&1 | grep -q "module tree changed; reloading"; then
+	echo "  PASS: the reload was logged with its paths"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: no structured log line for the automatic reload"
+	FAIL=$((FAIL + 1))
+fi
+
+cat >"$TMP/app/reloadwatch.js" <<'JS'
+export default function handler( {
+JS
+sleep 3
+check "a broken edit keeps the previous generation" GET / --host watch.example --status 200 --equals 'watch:v2'
+if docker logs "$CONTAINER_NAME" 2>&1 | grep -q "automatic reload rejected"; then
+	echo "  PASS: the rejected reload was logged"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: the rejected reload was not logged"
+	FAIL=$((FAIL + 1))
+fi
+
+cat >"$TMP/app/reloadwatch.js" <<'JS'
+export default function handler(http) {
+	http.respond(200, {}, "watch:v3")
+}
+JS
+wait_check "a repaired module reloads again" / --host watch.example --equals 'watch:v3'
+
+check "a request over the callback budget fails" GET / --host budget.example --status 500
 
 echo ""
 echo "=== Test 2: configuration validation ==="

@@ -7,14 +7,16 @@ Run ESM JavaScript inside Caddy as a native runtime. The target design is in
 [go-quickjs](https://github.com/go-quickjs/go-quickjs) VM; its top-level
 directives and its `handle` directives share that VM's realm, module cache, and
 entry modules. A configuration reload reuses the site VM when its `root`,
-`memory`, and `queue_size` are unchanged, so a route or mount edit keeps module
-state; `env_allow` and `fetch_allow` are refreshed in the reused VM. The
+`memory`, and `queue_size` are unchanged and no loaded module was edited, so a
+route or mount edit keeps module state; `env_allow` and `fetch_allow` are
+refreshed in the reused VM, and an edited module gets a fresh VM. The
 global option evaluates a worker entry but does not dispatch requests. The
 `http` object carries the request and its helpers, `route()` registers
 JavaScript layers, and the global worker owns `config`, the whole Caddy
 configuration. Workers, messaging, allowlisted fetch, filesystem access,
-`watch()`, and Caddy events in the global worker are installed; automatic
-reload on entry-module changes is not.
+`watch()`, and Caddy events in the global worker are installed. With `watch`
+left on, editing a module the VM loaded reloads the active configuration, and
+a rejected edit leaves the previous generation serving.
 
 ## What works today
 
@@ -129,9 +131,17 @@ reload on entry-module changes is not.
 - Reading `http.body` consumes the request stream, so a later Caddy handler sees
   an empty body.
 - `timeout` interrupts a runaway handler and answers `504`. A full per-VM queue
-  answers `503`. A thrown exception answers `500`.
+  answers `503`. A thrown exception, including the per-request callback budget,
+  answers `500`.
+- One request may make at most 10,000 host callbacks (header, body, variables,
+  rewrite, and template bridges). A loop that keeps calling into Go fails with
+  `request callback budget exceeded` instead of pinning the VM goroutine.
 - `memory` and `queue_size` are active. A reload closes an old VM only when a
-  VM option changed or the site is gone.
+  VM option changed, a loaded module was edited, or the site is gone. An
+  edited module gets a fresh VM; the previous generation keeps its own until
+  its handlers release it.
+- Shutdown stops new requests, waits up to 5s for admitted requests to finish,
+  then closes the loop and its workers.
 - Entry evaluation has a provision deadline. A syntax error, a rejected
   top-level await, or a runaway module fails the configuration load, so the
   previous generation keeps serving.
@@ -151,8 +161,17 @@ reload on entry-module changes is not.
 - `Worker` starts a runtime on its own goroutine with the same root,
   capabilities, and module loader. A worker specifier resolves against the
   entry module inside the sandbox; a bare specifier or one that leaves the root
-  is refused. At most 8 workers run at once, and closing the VM terminates
-  them.
+  is refused. At most 8 workers run at once; starting one past the limit throws
+  in the script, and closing the VM terminates the rest.
+- `watch [true|false]` reloads the active configuration when a module the VM
+  loaded changes. The entry module and its imports are watched, the 150ms
+  debounce coalesces one save, and concurrent handlers share one reload. A file
+  with a syntax error is rejected by the admin load, which is logged, and the
+  previous generation keeps serving until the file is fixed.
+- Requests and failures are counted per VM and logged at debug level with
+  method, path, status, queue depth, and duration. Queue-full and timeout
+  answers are warnings; an automatic reload is logged with its paths; a
+  rejected edit is a warning and a failed `config.apply()` is an error.
 - `process`, `require`, `run`, `serve`, `sockets`, and DNS are not installed.
 
 A global worker can add a route and reload Caddy without losing its own
@@ -172,9 +191,8 @@ setTimeout(() => {
 }, 1000)
 ```
 
-Parsed but not active yet: `watch`.
-`site`, `root`, `timeout`, `memory`, `queue_size`, `env_allow`, and
-`fetch_allow` are active.
+`site`, `root`, `timeout`, `memory`, `queue_size`, `env_allow`, `fetch_allow`,
+and `watch` are active.
 
 ## Caddyfile
 
@@ -207,7 +225,7 @@ Options are available on both the global option and the directive:
 | `queue_size <n>` | Per-VM admission queue. | `256` |
 | `env_allow <names...>` | Environment names visible to `_`. | empty |
 | `fetch_allow <hosts...>` | Outbound hosts for `fetch`, `_.httpInclude`, and `_.getHostByName`. | empty |
-| `watch [true\|false]` | Reload on module-tree changes. Parsed, not active yet. | `true` |
+| `watch [true\|false]` | Reload on module-tree changes. | `true` |
 
 ```caddyfile
 example.com {

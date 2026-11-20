@@ -178,6 +178,38 @@ export default function handler(http) { http.respond(200, {}, "ok") }
 	}
 }
 
+func TestWorkerLimitRejectsExtraWorkers(t *testing.T) {
+	dir := t.TempDir()
+	writeModule(t, dir, "worker.js", `setInterval(() => {}, 1000)
+`)
+	entry := writeModule(t, dir, "main.js", `let result = "none"
+for (let i = 0; i < 9; i++) {
+	try {
+		new Worker("/worker.js", { type: "module" })
+	} catch (e) {
+		result = "error:" + e.message
+	}
+}
+export default function handler(http) { http.respond(200, {}, result) }
+`)
+	v, err := New(Config{ScriptPath: entry, RootDir: dir, RequireHandler: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer v.Close()
+
+	resp, err := v.Handle(context.Background(), entry, testRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := string(resp.Body); !strings.HasPrefix(got, "error:") {
+		t.Errorf("worker limit body = %q, want a rejection", got)
+	}
+	if got := v.Stats().Failures; got != 0 {
+		t.Errorf("failures = %d, want 0", got)
+	}
+}
+
 func TestBroadcastChannelWithinVM(t *testing.T) {
 	dir := t.TempDir()
 	entry := writeModule(t, dir, "main.js", `let got = "pending"

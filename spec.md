@@ -448,5 +448,7 @@ admission, VM reuse across reloads when the VM options are unchanged, the
 global worker's mutable `config` object with `config.apply()` and
 `config.caddyfile()`, the `_` template registry, `fs`, allowlisted `fetch`,
 `env_allow`, `structuredClone`, messaging, workers, `watch()`, and Caddy
-events in the global worker are implemented. Automatic reload on entry-module
-changes remains.
+events in the global worker are implemented, along with automatic reload on
+entry-module changes and copy-on-edit VM replacement, a per-request callback
+budget, shutdown draining, sandbox and concurrency tests, and per-VM counters
+with structured logs. Streaming responses, SSE, and WebSocket upgrades remain.

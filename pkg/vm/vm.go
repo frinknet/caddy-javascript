@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ const (
 	DefaultMaxWorkers       = 8
 	DefaultFetchBodyLimit   = int64(1 << 20)
 	DefaultProvisionTimeout = 10 * time.Second
+	DefaultDrainTimeout     = 5 * time.Second
 )
 
 // vmSeq gives every VM a token for names that are process-wide, such as
@@ -52,6 +54,8 @@ type Config struct {
 	FetchAllow       []string
 	TemplateFuncs    map[string]any
 	Events           bool
+	Watch            bool
+	Reload           func() error
 }
 
 // Request is one dispatch into the VM. Req carries the live request: scripts
@@ -66,6 +70,9 @@ type Request struct {
 	Set     func(name string, value any)
 	Delete  func(name string)
 	MaxBody int64
+	// MaxCallbacks bounds host callbacks for this request. Zero uses
+	// DefaultMaxCallbacks.
+	MaxCallbacks int
 }
 
 type Response struct {
@@ -104,6 +111,14 @@ type VM struct {
 	watchMu  sync.Mutex
 	watchers map[int]*watchEntry
 	watchSeq int
+
+	reloadMu  sync.Mutex
+	reloadFn  func() error
+	treeWatch *treeWatcher
+
+	closing  atomic.Bool
+	inflight atomic.Int64
+	metrics  counters
 
 	config     quickjs.Value
 	stringify  quickjs.Value
@@ -154,7 +169,7 @@ func New(cfg Config) (*VM, error) {
 		return nil, fmt.Errorf("javascript: root %q: %w", dir, err)
 	}
 
-	sb := &sandbox{root: root, dir: dir}
+	sb := &sandbox{root: root, dir: dir, modules: make(map[string][32]byte)}
 	entryName, err := sb.name(script)
 	if err != nil {
 		root.Close()
@@ -165,6 +180,7 @@ func New(cfg Config) (*VM, error) {
 		root.Close()
 		return nil, err
 	}
+	sb.record(entryName, src)
 
 	loader := func(specifier, referrer string) (string, string, error) {
 		name, err := sb.resolve(specifier, referrer)
@@ -175,6 +191,7 @@ func New(cfg Config) (*VM, error) {
 		if err != nil {
 			return "", "", err
 		}
+		sb.record(name, src)
 		return string(src), name, nil
 	}
 
@@ -218,6 +235,7 @@ func New(cfg Config) (*VM, error) {
 				if err != nil {
 					return "", "", false, err
 				}
+				sb.record(name, src)
 				return string(src), name, true, nil
 			},
 		},
@@ -268,6 +286,7 @@ func New(cfg Config) (*VM, error) {
 		envAllow:       cfg.EnvAllow,
 		fetchAllow:     cfg.FetchAllow,
 		templateFuncs:  cfg.TemplateFuncs,
+		reloadFn:       cfg.Reload,
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
 
@@ -350,6 +369,18 @@ func New(cfg Config) (*VM, error) {
 
 	loop.Begin()
 	go v.run()
+	if cfg.Watch && cfg.Reload != nil {
+		v.startTreeWatch()
+	}
+	if v.logger != nil {
+		v.logger.Debug("javascript: vm started",
+			zap.String("script", script),
+			zap.String("root", dir),
+			zap.Int64("memory", cfg.Memory),
+			zap.Int("queue_size", cfg.QueueSize),
+			zap.Int("max_workers", DefaultMaxWorkers),
+		)
+	}
 	return v, nil
 }
 
@@ -358,6 +389,7 @@ func New(cfg Config) (*VM, error) {
 func (v *VM) cleanupNew() {
 	v.cancel()
 	v.stopAllWatchers()
+	v.stopTreeWatch()
 	v.rt.Close()
 	_ = v.root.Close()
 }
@@ -371,12 +403,17 @@ func (v *VM) run() {
 		}
 	}
 	v.stopAllWatchers()
+	v.stopTreeWatch()
 	v.rt.Close()
 	_ = v.root.Close()
 }
 
 func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Response, error) {
+	v.metrics.requests.Add(1)
 	if err := v.err(); err != nil {
+		if errors.Is(err, ErrClosed) {
+			v.metrics.closed.Add(1)
+		}
 		return nil, err
 	}
 
@@ -385,15 +422,24 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 	layers := append([]layer(nil), v.layers[scriptPath]...)
 	v.mu.RUnlock()
 	if !ok {
+		v.metrics.failures.Add(1)
 		return nil, fmt.Errorf("javascript: module %q is not loaded", scriptPath)
 	}
 
 	select {
 	case v.slots <- struct{}{}:
 	default:
+		v.metrics.queueFull.Add(1)
 		return nil, ErrQueueFull
 	}
 	defer func() { <-v.slots }()
+
+	v.inflight.Add(1)
+	defer v.inflight.Add(-1)
+	if v.closing.Load() {
+		v.metrics.closed.Add(1)
+		return nil, ErrClosed
+	}
 
 	type result struct {
 		resp *Response
@@ -403,6 +449,7 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 	resp := &response{}
 	st, err := newRequestState(req, resp)
 	if err != nil {
+		v.metrics.failures.Add(1)
 		return nil, err
 	}
 
@@ -424,15 +471,25 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 
 	select {
 	case r := <-ch:
+		if r.err != nil {
+			v.metrics.failures.Add(1)
+		}
 		return r.resp, r.err
 	case <-ctx.Done():
 		st.finish()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			v.metrics.timeouts.Add(1)
+		} else {
+			v.metrics.failures.Add(1)
+		}
 		return nil, ctx.Err()
 	case <-v.closed:
 		st.finish()
+		v.metrics.closed.Add(1)
 		return nil, ErrClosed
 	case <-v.done:
 		st.finish()
+		v.metrics.closed.Add(1)
 		if err := v.runError(); err != nil {
 			return nil, err
 		}
@@ -536,6 +593,7 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return err
 		}
+		v.sandbox.record(name, src)
 	}
 
 	ch := make(chan error, 1)
@@ -588,6 +646,9 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 
 	select {
 	case err := <-ch:
+		if err == nil {
+			v.setReload(cfg.Reload, cfg.Watch)
+		}
 		return err
 	case <-v.done:
 		if err := v.runError(); err != nil {
@@ -599,12 +660,43 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 
 func (v *VM) Close() error {
 	v.closeOnce.Do(func() {
+		v.closing.Store(true)
+		v.stopAllWatchers()
+		v.stopTreeWatch()
+		v.drain()
 		close(v.closed)
 		v.loop.Close()
 		v.cancel()
 	})
 	<-v.done
 	return v.runError()
+}
+
+// drain waits for the requests already admitted to finish before the loop is
+// closed. Work that arrives after Close is refused by the closing flag, and a
+// request that outlasts the drain window is cut off with the rest of the loop.
+func (v *VM) drain() {
+	deadline := time.NewTimer(DefaultDrainTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if v.inflight.Load() == 0 {
+			return
+		}
+		select {
+		case <-deadline.C:
+			if v.logger != nil {
+				v.logger.Warn("javascript: shutdown drain timed out",
+					zap.Int64("inflight", v.inflight.Load()),
+				)
+			}
+			return
+		case <-v.done:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (v *VM) runError() error {
@@ -701,6 +793,27 @@ func (r *response) responded() bool {
 type sandbox struct {
 	root *os.Root
 	dir  string
+
+	mu      sync.Mutex
+	modules map[string][32]byte
+}
+
+// record remembers a module the loader read, so the VM can tell whether the
+// file was edited and watch its directory.
+func (s *sandbox) record(name string, src []byte) {
+	s.mu.Lock()
+	s.modules[name] = sha256.Sum256(src)
+	s.mu.Unlock()
+}
+
+func (s *sandbox) moduleHashes() map[string][32]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	modules := make(map[string][32]byte, len(s.modules))
+	for name, sum := range s.modules {
+		modules[name] = sum
+	}
+	return modules
 }
 
 func (s *sandbox) name(abs string) (string, error) {
