@@ -34,6 +34,7 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 cp -R test/app "$TMP/app" || exit 1
+mkdir -p "$TMP/app/watch" || exit 1
 
 cat >"$TMP/Caddyfile" <<'CADDY'
 {
@@ -109,6 +110,14 @@ http://vars.example:80 {
 http://chain.example:80 {
 	javascript /app/chain-auth.js
 	javascript /app/chain-site.js
+}
+
+http://scope-a.example:80 {
+	javascript /app/scope-a.js
+}
+
+http://scope-b.example:80 {
+	javascript /app/scope-b.js
 }
 
 CADDY
@@ -262,6 +271,27 @@ check() {
 	fi
 }
 
+# check_file NAME PATH EXPECTED
+# Retries until a file the container wrote through the /app volume matches.
+check_file() {
+	check_file_name=$1
+	check_file_path=$2
+	check_file_want=$3
+	i=0
+	while [ "$i" -lt 50 ]; do
+		if [ -f "$check_file_path" ] && [ "$(cat "$check_file_path")" = "$check_file_want" ]; then
+			echo "  PASS: $check_file_name"
+			PASS=$((PASS + 1))
+			return
+		fi
+		i=$((i + 1))
+		sleep 0.1
+	done
+	echo "    $(cat "$check_file_path" 2>/dev/null)"
+	echo "  FAIL: $check_file_name"
+	FAIL=$((FAIL + 1))
+}
+
 # wait_check NAME PATH [--host NAME] --equals BODY
 # Retries until the body matches exactly, for work that settles on the loop.
 wait_check() {
@@ -355,9 +385,17 @@ echo "=== Test 1a: capabilities ==="
 check "fs reads the sandbox root" GET /caps/fs --host caps.example --status 200 --equals "$(cat test/app/lib.js)"
 check "structuredClone copies plain data" GET /caps/clone --host caps.example --status 200 --equals '{"a":[1,2],"b":"x"}'
 check "fetch is absent without fetch_allow" GET /caps/fetch --host caps.example --status 200 --equals 'undefined'
+check "events is absent in a site VM" GET /caps/events --host caps.example --status 200 --equals 'undefined'
+check_file "the global worker receives a Caddy event" "$TMP/app/events.txt" 'started|caddy|none'
+printf probe > "$TMP/app/watch/probe.txt"
+check_file "watch reports a changed file" "$TMP/app/watch.txt" '/watch/probe.txt'
 wait_check "a worker posts to its parent" /caps/worker --host caps.example --equals 'worker:ok'
 wait_check "a BroadcastChannel reaches the same VM" /caps/channel --host caps.example --equals 'channel:ok'
 wait_check "fetch reaches an allowed host" /caps/fetch --host allow.example --equals 'GET /anything'
+check "fetch refuses a host outside fetch_allow" GET /caps/fetch-denied --host allow.example --status 200 --equals 'denied'
+check "the sending site is serving" GET / --host scope-a.example --status 200 --equals 'a'
+sleep 1
+check "a BroadcastChannel does not cross site VMs" GET / --host scope-b.example --status 200 --equals 'none'
 
 echo ""
 echo "=== Test 1b: worker config ==="

@@ -7,6 +7,20 @@ const attempt = () => {
 }
 attempt()
 
+let denied = "pending"
+fetch("http://localhost/anything")
+	.then(() => { denied = "allowed" })
+	.catch(() => { denied = "denied" })
+
 export default function handler(http) {
-	http.respond(200, {}, result)
+	switch (http.path) {
+		case "/caps/fetch":
+			http.respond(200, {}, result)
+			return
+		case "/caps/fetch-denied":
+			http.respond(200, {}, denied)
+			return
+		default:
+			http.respond(404, {}, "no")
+	}
 }

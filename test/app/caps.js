@@ -27,6 +27,9 @@ export default function handler(http) {
 		case "/caps/fetch":
 			http.respond(200, {}, typeof fetch)
 			return
+		case "/caps/events":
+			http.respond(200, {}, typeof globalThis.events)
+			return
 		default:
 			http.respond(404, {}, "no")
 	}

@@ -7,6 +7,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/caddyserver/caddy/v2 v2.11.9
 	github.com/dustin/go-humanize v1.1.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-quickjs/go-quickjs v0.40.0
 	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0

@@ -15,6 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyevents"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 
@@ -68,6 +69,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 		Caddy:          &vm.CaddyConfig{Apply: applyCaddyConfig},
 		EnvAllow:       a.EnvAllow,
 		FetchAllow:     a.FetchAllow,
+		Events:         true,
 	}
 	provisionCtx, cancel := context.WithTimeout(context.Background(), vm.DefaultProvisionTimeout)
 	defer cancel()
@@ -77,9 +79,62 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	a.vm = v
 	a.pool = key
+	if err := a.bindEvents(ctx, v); err != nil {
+		_ = releaseApp(a.pool)
+		a.pool = ""
+		return err
+	}
 	if !reused || !v.HasConfig() {
 		a.seedConfig(ctx, v)
 	}
+	return nil
+}
+
+// bindEvents subscribes the worker's listeners for this configuration
+// generation. Caddy keeps subscriptions open only until the events app starts,
+// so every reload binds the names the module registered again.
+func (a *App) bindEvents(ctx caddy.Context, v *vm.VM) error {
+	if ctx.Context == nil {
+		v.MarkEventBound()
+		return nil
+	}
+	appIface, err := ctx.App("events")
+	if err != nil {
+		return fmt.Errorf("javascript: events app: %w", err)
+	}
+	eventsApp, ok := appIface.(*caddyevents.App)
+	if !ok {
+		return fmt.Errorf("javascript: events app has unexpected type %T", appIface)
+	}
+	for _, name := range v.EventNames() {
+		if err := eventsApp.On(name, eventSink{v: v}); err != nil {
+			return fmt.Errorf("javascript: subscribe %q: %w", name, err)
+		}
+	}
+	v.MarkEventBound()
+	return nil
+}
+
+// eventSink copies one Caddy event into the worker VM.
+type eventSink struct {
+	v *vm.VM
+}
+
+func (s eventSink) Handle(_ context.Context, event caddy.Event) error {
+	if s.v == nil {
+		return nil
+	}
+	origin := "caddy"
+	if module := event.Origin(); module != nil {
+		origin = string(module.CaddyModule().ID)
+	}
+	s.v.DispatchEvent(vm.Event{
+		ID:     event.ID().String(),
+		Name:   event.Name(),
+		Origin: origin,
+		Time:   event.Timestamp(),
+		Data:   event.Data,
+	})
 	return nil
 }
 

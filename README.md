@@ -12,8 +12,9 @@ state; `env_allow` and `fetch_allow` are refreshed in the reused VM. The
 global option evaluates a worker entry but does not dispatch requests. The
 `http` object carries the request and its helpers, `route()` registers
 JavaScript layers, and the global worker owns `config`, the whole Caddy
-configuration. Workers, messaging, events, fetch, and filesystem access are not
-implemented yet.
+configuration. Workers, messaging, allowlisted fetch, filesystem access,
+`watch()`, and Caddy events in the global worker are installed; automatic
+reload on entry-module changes is not.
 
 ## What works today
 
@@ -110,6 +111,14 @@ implemented yet.
   Adaptation warnings are logged. Caddy resolves the file's `import`s relative
   to the file, so imported files can leave the ESM root; treat the path as
   trusted input.
+- `events` is installed only in the global worker. `events.on(name, fn)`
+  registers a listener at module scope, and `events.on("*", fn)` listens to
+  every event. Caddy accepts subscriptions only before its apps start, so a
+  registration after module evaluation is an error. A listener receives
+  `{ id, name, origin, time, data }`: `origin` is `caddy` for core events, and
+  `data` is a plain clone of the event payload. Events are delivered on the VM
+  loop, so listeners run after the emitter returns. Each reload binds the
+  worker's listeners again; a changed worker module replaces the old ones.
 - `respond` writes the status, headers, and body. A handler that returns without
   responding calls the next Caddy handler; use `respond(404, ...)` to answer
   404 explicitly.
@@ -128,6 +137,10 @@ implemented yet.
   previous generation keeps serving.
 - `fs` is available as the `fs` module. The sandbox root is `/` to the script;
   `..` and symlinks that leave the root are refused, and writes stay inside it.
+- `watch(dir, fn)` watches one sandbox directory without recursing, debounces
+  changes by 100ms, and calls `fn(names)` with the changed paths. It returns a
+  function that stops the watch. The callback runs on the VM loop. Watches stop
+  when the VM closes or its module is replaced.
 - `fetch` is installed only when `fetch_allow` is non-empty. Every request,
   including each redirect, is checked against the allowlist; response bodies
   are capped at 1 MiB. `_.httpInclude` and `_.getHostByName` use the same list.
@@ -223,12 +236,13 @@ export default function handler(http) {
 }
 ```
 
-Timers, promises, `fs`, `fetch` (with `fetch_allow`), workers, `MessageChannel`,
-`BroadcastChannel`, and `structuredClone` are installed. Handlers and route
-layers must finish synchronously: a promise returned by a handler is not
-awaited, and a script that responds after the dispatch has returned gets an
-error. Start asynchronous work from module scope, a timer, or a worker, and
-read its result on a later request. Caddy events are not available yet.
+Timers, promises, `fs`, `watch`, `fetch` (with `fetch_allow`), workers,
+`MessageChannel`, `BroadcastChannel`, `structuredClone`, and `events` in the
+global worker are installed. Handlers and route layers must finish
+synchronously: a promise returned by a handler is not awaited, and a script
+that responds after the dispatch has returned gets an error. Start asynchronous work from module scope,
+a timer, an event listener, or a worker, and read its result on a later
+request.
 
 ## JSON configuration
 

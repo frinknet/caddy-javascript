@@ -51,6 +51,7 @@ type Config struct {
 	EnvAllow         []string
 	FetchAllow       []string
 	TemplateFuncs    map[string]any
+	Events           bool
 }
 
 // Request is one dispatch into the VM. Req carries the live request: scripts
@@ -92,6 +93,17 @@ type VM struct {
 	templateFuncs map[string]any
 	envAllow      []string
 	fetchAllow    []string
+
+	events         bool
+	eventMu        sync.Mutex
+	eventNames     map[string]struct{}
+	eventListeners map[string][]quickjs.Value
+	eventBound     bool
+	eventSlots     chan struct{}
+
+	watchMu  sync.Mutex
+	watchers map[int]*watchEntry
+	watchSeq int
 
 	config     quickjs.Value
 	stringify  quickjs.Value
@@ -259,6 +271,17 @@ func New(cfg Config) (*VM, error) {
 	}
 	v.ctx, v.cancel = context.WithCancel(context.Background())
 
+	if cfg.Events {
+		if err := v.installEvents(); err != nil {
+			v.cleanupNew()
+			return nil, fmt.Errorf("javascript: install events: %w", err)
+		}
+	}
+	if err := v.installWatch(); err != nil {
+		v.cleanupNew()
+		return nil, fmt.Errorf("javascript: install watch: %w", err)
+	}
+
 	factory, err := rt.Eval(varsFactorySource)
 	if err != nil {
 		v.cleanupNew()
@@ -334,6 +357,7 @@ func New(cfg Config) (*VM, error) {
 // loop has not started yet, so the runtime is closed directly.
 func (v *VM) cleanupNew() {
 	v.cancel()
+	v.stopAllWatchers()
 	v.rt.Close()
 	_ = v.root.Close()
 }
@@ -346,6 +370,7 @@ func (v *VM) run() {
 			v.logger.Error("javascript: vm loop stopped", zap.Error(err))
 		}
 	}
+	v.stopAllWatchers()
 	v.rt.Close()
 	_ = v.root.Close()
 }
@@ -530,6 +555,8 @@ func (v *VM) join(ctx context.Context, cfg Config) error {
 			ch <- nil
 			return
 		}
+		v.clearEventListeners()
+		v.stopAllWatchers()
 		v.currentScript = script
 		ns, err := v.rt.EvalModuleContext(ctx, name, string(src))
 		v.currentScript = ""

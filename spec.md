@@ -447,5 +447,6 @@ and `respond`), `route()` layers, timeouts, memory limits, queue
 admission, VM reuse across reloads when the VM options are unchanged, the
 global worker's mutable `config` object with `config.apply()` and
 `config.caddyfile()`, the `_` template registry, `fs`, allowlisted `fetch`,
-`env_allow`, `structuredClone`, messaging, and workers are implemented.
-Caddy events and watching remain.
+`env_allow`, `structuredClone`, messaging, workers, `watch()`, and Caddy
+events in the global worker are implemented. Automatic reload on entry-module
+changes remains.

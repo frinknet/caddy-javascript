@@ -1,5 +1,15 @@
+import fs from "fs"
+
 let calls = 0
 let timer = null
+
+events.on("started", (e) => {
+	fs.writeFileSync("/events.txt", [e.name, e.origin, e.data === null ? "none" : "data"].join("|"))
+})
+
+watch("/watch", (names) => {
+	fs.writeFileSync("/watch.txt", names.join(","))
+})
 
 function serverRoutes() {
 	const config = globalThis.config
