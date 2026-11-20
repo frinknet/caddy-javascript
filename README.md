@@ -14,9 +14,10 @@ global option evaluates a worker entry but does not dispatch requests. The
 `http` object carries the request and its helpers, `route()` registers
 JavaScript layers, and the global worker owns `config`, the whole Caddy
 configuration. Workers, messaging, allowlisted fetch, filesystem access,
-`watch()`, and Caddy events in the global worker are installed. With `watch`
-left on, editing a module the VM loaded reloads the active configuration, and
-a rejected edit leaves the previous generation serving.
+`watch()`, and Caddy events in the global worker are installed. Chunked
+streams, server-sent events, and WebSocket upgrades are installed too. With
+`watch` left on, editing a module the VM loaded reloads the active
+configuration, and a rejected edit leaves the previous generation serving.
 
 ## What works today
 
@@ -38,7 +39,7 @@ a rejected edit leaves the previous generation serving.
 - Each request gets a fresh `http` object with `method`, `url`, `path`,
   `query`, `headers`, `cookies`, `body`
   (`text`/`json`/`bytes`, bounded at 1 MiB), `host`, `remote`, `protocol`,
-  `vars`, `rewrite`, and `respond`.
+  `vars`, `rewrite`, `respond`, `stream`, `sse`, and `websocket`.
 - During a dispatch the global space is the request's Caddy placeholder space.
   Reading a bare identifier resolves a `map` destination or any other
   placeholder (`site`, `host`, `method`, `path`); it never reads a variable.
@@ -124,6 +125,22 @@ a rejected edit leaves the previous generation serving.
 - `respond` writes the status, headers, and body. A handler that returns without
   responding calls the next Caddy handler; use `respond(404, ...)` to answer
   404 explicitly.
+- `http.stream(status, headers)` starts a chunked response and returns a writer
+  with `write(chunk)`, `end(chunk?)`, and `close()`. Every chunk is flushed, so
+  a client sees it immediately. The writer stays usable after the dispatch
+  returns, which lets a timer send a slow body; the handler waits until the
+  stream ends or the client disconnects. `http.respond()` after a stream throws.
+- `http.sse()` starts a `text/event-stream` response and returns
+  `send(data, {event, id, retry})`, `comment(text)`, and `close()`. A string is
+  sent as-is and any other value is JSON-encoded; multi-line data becomes one
+  `data:` line per line.
+- `http.websocket()` upgrades a WebSocket request and returns a socket with
+  `send(data)`, `close(code?, reason?)`, `onmessage`, and `onclose`. A string is
+  sent as a text frame and a `Uint8Array` as a binary frame. The socket keeps
+  the connection alive after the dispatch returns; `onmessage(data)` runs on
+  the VM loop, and `onclose(code, reason)` runs when either side closes.
+  Fragmented messages are reassembled, client frames must be masked, and a
+  message is capped at 1 MiB.
 - Multiple `javascript` directives in one site block form an ordered chain and
   share the site VM. Each module's default export runs at its directive
   position; a handler that responds stops the chain, and one that returns
@@ -254,13 +271,44 @@ export default function handler(http) {
 }
 ```
 
+A stream, SSE response, or WebSocket stays live after the dispatch:
+
+```js
+export default function handler(http) {
+	if (http.path === "/events") {
+		const sse = http.sse()
+		let n = 0
+		const timer = setInterval(() => {
+			if (++n > 5) {
+				clearInterval(timer)
+				sse.close()
+				return
+			}
+			sse.send(n, { event: "tick" })
+		}, 1000)
+		return
+	}
+	if (http.path === "/socket") {
+		const ws = http.websocket()
+		ws.onmessage = (data) => ws.send("echo:" + data)
+		ws.onclose = () => console.log("closed")
+		return
+	}
+	const out = http.stream(200, { "content-type": "text/plain" })
+	out.write("first ")
+	setTimeout(() => out.end("second"), 100)
+}
+```
+
 Timers, promises, `fs`, `watch`, `fetch` (with `fetch_allow`), workers,
 `MessageChannel`, `BroadcastChannel`, `structuredClone`, and `events` in the
-global worker are installed. Handlers and route layers must finish
-synchronously: a promise returned by a handler is not awaited, and a script
-that responds after the dispatch has returned gets an error. Start asynchronous work from module scope,
-a timer, an event listener, or a worker, and read its result on a later
-request.
+global worker are installed. A handler or route layer normally finishes
+synchronously: a promise returned by a handler is not awaited, and
+`respond()` after the dispatch has returned throws. A stream or WebSocket is
+the exception: its writer and callbacks stay live after the dispatch returns,
+bounded by the client connection rather than the handler `timeout`. Start
+other asynchronous work from module scope, a timer, an event listener, or a
+worker, and read its result on a later request.
 
 ## JSON configuration
 

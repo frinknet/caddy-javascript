@@ -6,7 +6,8 @@ site entry and its handle directives;
 ESM evaluation with a sandboxed loader and a provision deadline; a process-wide
 site VM pool keyed by host matcher set or explicit `site`; a per-request `http`
 object with request facts, headers, a bounded body, cookies, a live vars proxy,
-`rewrite`, and `respond`; `route()` JavaScript layers; and the global worker's
+`rewrite`, `respond`, chunked `stream`, `sse`, and `websocket`; `route()`
+JavaScript layers; and the global worker's
 mutable `config` object, committed through the admin endpoint while the worker
 VM survives the reload. The rest of this file is the target. `README.md`
 documents what runs today.
@@ -198,6 +199,12 @@ Every request receives a fresh `http` object. It carries:
   `protocol`, `host`.
 - `vars`, a live view of the request's Caddy variable table.
 - `respond(status, headers, body)`, terminal.
+- `stream(status, headers)`, which starts a chunked response and returns a
+  writer with `write`, `end`, and `close`.
+- `sse()`, which starts a `text/event-stream` response and returns `send`,
+  `comment`, and `close` helpers.
+- `websocket()`, which upgrades the connection and returns a socket with
+  `send`, `close`, `onmessage`, and `onclose`.
 - `rewrite({method, path, headers})`, which mutates the real `*http.Request`
   (`URL.Path`, `RawPath`, `RequestURI`, headers) and continues.
 - `signal`, cancelled when the client disconnects or the request deadline ends.
@@ -238,6 +245,8 @@ The runtime provides a small, Caddy-shaped surface, not Express:
 - `http.body.text/json/bytes`, bounded by `max_body`
 - `http.cookies`
 - `http.respond()` with status, headers, and string, bytes, or JSON body
+- `http.stream()` for chunked responses, `http.sse()` for server-sent events,
+  and `http.websocket()` for upgrades
 - `http.rewrite()`
 - `http.signal`
 
@@ -435,15 +444,17 @@ Substring checks are not a substitute for exact bytes.
 - The JIT, initially.
 - VM pools for one site. One site is one thread; a pool would need a shared-note
   model and is a separate design.
-- Streaming responses, SSE, and WebSocket upgrades. Add them after the core
-  chain and lifecycle are stable.
+- Streaming responses, SSE, and WebSocket upgrades are implemented; a stream
+  and a socket stay live after the dispatch returns, bounded by the client
+  connection rather than the handler timeout.
 
 ## 10. Current state
 
 The configuration surface, one go-quickjs VM per site, ESM
 evaluation with a sandboxed loader, a per-request `http` (request facts,
 `headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
-and `respond`), `route()` layers, timeouts, memory limits, queue
+`respond`, `stream`, `sse`, and `websocket`), `route()` layers, timeouts,
+memory limits, queue
 admission, VM reuse across reloads when the VM options are unchanged, the
 global worker's mutable `config` object with `config.apply()` and
 `config.caddyfile()`, the `_` template registry, `fs`, allowlisted `fetch`,
@@ -451,4 +462,5 @@ global worker's mutable `config` object with `config.apply()` and
 events in the global worker are implemented, along with automatic reload on
 entry-module changes and copy-on-edit VM replacement, a per-request callback
 budget, shutdown draining, sandbox and concurrency tests, and per-VM counters
-with structured logs. Streaming responses, SSE, and WebSocket upgrades remain.
+with structured logs. Chunked responses, SSE, and WebSocket upgrades are also
+implemented.

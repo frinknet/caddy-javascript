@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -308,13 +310,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		setVar = repl.Set
 		deleteVar = repl.Delete
 	}
+	respHolder := &streamWriter{w: w, rc: http.NewResponseController(w)}
 	resp, err := h.vm.Handle(ctx, h.script, vm.Request{
-		Req:    r,
-		Vars:   vars,
-		Lookup: lookup,
-		Set:    setVar,
-		Delete: deleteVar,
+		Req:           r,
+		Vars:          vars,
+		Lookup:        lookup,
+		Set:           setVar,
+		Delete:        deleteVar,
+		Writer:        respHolder,
+		StreamContext: r.Context(),
+		Hijack: func() (net.Conn, *bufio.ReadWriter, error) {
+			return http.NewResponseController(w).Hijack()
+		},
 	})
+	if resp != nil && resp.Streamed {
+		if err != nil && h.logger != nil {
+			h.logger.Debug("javascript: stream ended with an error",
+				zap.Error(err),
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Duration("duration", time.Since(start)),
+			)
+		}
+		return nil
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
 			return r.Context().Err()

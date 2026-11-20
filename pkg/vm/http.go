@@ -1,11 +1,13 @@
 package vm
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -128,9 +130,15 @@ type requestState struct {
 	finished bool
 	calls    int
 	maxCalls int
+
+	v        *VM
+	stream   *streamState
+	ws       *wsConn
+	lifetime context.Context
+	hijack   func() (net.Conn, *bufio.ReadWriter, error)
 }
 
-func newRequestState(req Request, resp *response) (*requestState, error) {
+func newRequestState(v *VM, req Request, resp *response) (*requestState, error) {
 	if req.Req == nil {
 		return nil, errors.New("javascript: request is required")
 	}
@@ -155,13 +163,46 @@ func newRequestState(req Request, resp *response) (*requestState, error) {
 		delete:   req.Delete,
 		maxBody:  maxBody,
 		maxCalls: maxCalls,
+		v:        v,
+		stream:   newStreamState(v, req.Writer),
+		hijack:   req.Hijack,
 	}, nil
 }
 
 func (s *requestState) finish() {
 	s.mu.Lock()
 	s.finished = true
+	ws := s.ws
 	s.mu.Unlock()
+	s.stream.stop()
+	if ws != nil {
+		ws.shutdown()
+	}
+}
+
+func (s *requestState) setWebSocket(ws *wsConn) {
+	s.mu.Lock()
+	s.ws = ws
+	s.mu.Unlock()
+}
+
+func (s *requestState) webSocket() *wsConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ws
+}
+
+func (s *requestState) streaming() bool {
+	s.mu.Lock()
+	ws := s.ws
+	s.mu.Unlock()
+	return s.stream.isStarted() || ws != nil
+}
+
+func (s *requestState) isFinished() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finished
 }
 
 func (s *requestState) currentPath() string {
@@ -487,18 +528,21 @@ func (v *VM) newHTTP(ctx context.Context, st *requestState, resp *response) (qui
 
 	obj := v.rt.NewObject()
 	for name, value := range map[string]any{
-		"method":   st.req.Method,
-		"url":      st.req.URL.String(),
-		"path":     st.req.URL.Path,
-		"query":    query,
-		"cookies":  cookies,
-		"host":     st.req.Host,
-		"remote":   st.req.RemoteAddr,
-		"protocol": st.req.Proto,
-		"headers":  headers,
-		"body":     body,
-		"respond":  resp.respond,
-		"rewrite":  st.rewrite,
+		"method":    st.req.Method,
+		"url":       st.req.URL.String(),
+		"path":      st.req.URL.Path,
+		"query":     query,
+		"cookies":   cookies,
+		"host":      st.req.Host,
+		"remote":    st.req.RemoteAddr,
+		"protocol":  st.req.Proto,
+		"headers":   headers,
+		"body":      body,
+		"respond":   resp.respond,
+		"rewrite":   st.rewrite,
+		"stream":    st.openStream,
+		"sse":       st.openSSE,
+		"websocket": st.openWebSocket,
 	} {
 		if err := obj.Set(name, value); err != nil {
 			return quickjs.Value{}, err

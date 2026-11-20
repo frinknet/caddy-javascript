@@ -1,11 +1,13 @@
 package vm
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -73,12 +75,23 @@ type Request struct {
 	// MaxCallbacks bounds host callbacks for this request. Zero uses
 	// DefaultMaxCallbacks.
 	MaxCallbacks int
+
+	// Writer receives a streaming response. When nil, a stream is buffered
+	// into Response.Body instead.
+	Writer StreamWriter
+	// StreamContext bounds a streaming response after it starts. The
+	// dispatch itself is still bounded by the Handle context.
+	StreamContext context.Context
+	// Hijack takes over the connection for a WebSocket upgrade. A handler
+	// supplies it; a nil value makes http.websocket() fail.
+	Hijack func() (net.Conn, *bufio.ReadWriter, error)
 }
 
 type Response struct {
-	Status  int
-	Headers map[string]string
-	Body    []byte
+	Status   int
+	Headers  map[string]string
+	Body     []byte
+	Streamed bool
 }
 
 type VM struct {
@@ -441,18 +454,19 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 		return nil, ErrClosed
 	}
 
-	type result struct {
-		resp *Response
-		err  error
-	}
-	ch := make(chan result, 1)
 	resp := &response{}
-	st, err := newRequestState(req, resp)
+	st, err := newRequestState(v, req, resp)
 	if err != nil {
 		v.metrics.failures.Add(1)
 		return nil, err
 	}
+	st.lifetime = ctx
+	if req.StreamContext != nil {
+		st.lifetime = req.StreamContext
+	}
+	defer st.finish()
 
+	ch := make(chan error, 1)
 	v.loop.Post(func() {
 		v.active = st
 		defer func() { v.active = nil }()
@@ -465,35 +479,144 @@ func (v *VM) Handle(ctx context.Context, scriptPath string, req Request) (*Respo
 				_, err = entry.CallContext(ctx, httpObj)
 			}
 		}
-		st.finish()
-		ch <- result{resp: resp.finish(), err: portableError(err)}
+		ch <- portableError(err)
 	})
 
-	select {
-	case r := <-ch:
-		if r.err != nil {
-			v.metrics.failures.Add(1)
+	dispatchDone := false
+	streamDone := false
+	var dispatchErr error
+	var wsDone <-chan struct{}
+	for {
+		streamed := st.streaming()
+		if dispatchDone {
+			if dispatchErr != nil {
+				v.drainStreamEvents(st)
+				return st.finishResponse(resp, dispatchErr)
+			}
+			if !streamed || streamDone {
+				return st.finishResponse(resp, dispatchErr)
+			}
+			if ws := st.webSocket(); ws != nil && ws.isClosed() {
+				return st.finishResponse(resp, dispatchErr)
+			}
 		}
-		return r.resp, r.err
-	case <-ctx.Done():
-		st.finish()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			v.metrics.timeouts.Add(1)
+
+		var events <-chan streamEvent
+		if !streamDone {
+			events = st.stream.events
+		}
+		if ws := st.webSocket(); ws != nil && !ws.isClosed() {
+			wsDone = ws.done
 		} else {
-			v.metrics.failures.Add(1)
+			wsDone = nil
 		}
-		return nil, ctx.Err()
-	case <-v.closed:
-		st.finish()
-		v.metrics.closed.Add(1)
-		return nil, ErrClosed
-	case <-v.done:
-		st.finish()
-		v.metrics.closed.Add(1)
-		if err := v.runError(); err != nil {
-			return nil, err
+		ctxDone := ctx.Done()
+		if streamed {
+			ctxDone = st.lifetime.Done()
 		}
-		return nil, ErrClosed
+
+		select {
+		case dispatchErr = <-ch:
+			dispatchDone = true
+			ch = nil
+			if dispatchErr != nil {
+				v.metrics.failures.Add(1)
+			}
+		case ev := <-events:
+			if err := v.applyStreamEvent(st, ev); err != nil {
+				st.stream.stop()
+				v.metrics.failures.Add(1)
+				return st.finishResponse(resp, err)
+			}
+			if ev.end {
+				streamDone = true
+			}
+		case <-wsDone:
+			wsDone = nil
+		case <-ctxDone:
+			cause := ctx.Err()
+			if streamed {
+				cause = st.lifetime.Err()
+			}
+			if errors.Is(cause, context.DeadlineExceeded) {
+				v.metrics.timeouts.Add(1)
+			} else {
+				v.metrics.failures.Add(1)
+			}
+			if streamed {
+				return st.finishResponse(resp, cause)
+			}
+			return nil, cause
+		case <-v.closed:
+			v.metrics.closed.Add(1)
+			if st.streaming() {
+				return st.finishResponse(resp, ErrClosed)
+			}
+			return nil, ErrClosed
+		case <-v.done:
+			v.metrics.closed.Add(1)
+			cause := v.runError()
+			if cause == nil {
+				cause = ErrClosed
+			}
+			if st.streaming() {
+				return st.finishResponse(resp, cause)
+			}
+			return nil, cause
+		}
+	}
+}
+
+// finishResponse turns the request state into the response the handler sees.
+// A buffered stream keeps its chunks in Body; a handler-owned stream has
+// already written them.
+func (s *requestState) finishResponse(resp *response, err error) (*Response, error) {
+	out := resp.finish()
+	if out != nil && out.Streamed {
+		out.Body = s.stream.bodyCopy()
+	}
+	return out, err
+}
+
+// drainStreamEvents applies chunks that were queued before a dispatch error
+// ended the request, so a partial response is not silently dropped.
+func (v *VM) drainStreamEvents(st *requestState) {
+	for {
+		select {
+		case ev := <-st.stream.events:
+			if err := v.applyStreamEvent(st, ev); err != nil {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// applyStreamEvent hands one chunk to the handler's writer. Without a writer
+// the stream is buffered, which is how a unit test observes it.
+func (v *VM) applyStreamEvent(st *requestState, ev streamEvent) error {
+	w := st.stream.writer
+	switch {
+	case ev.start:
+		if w == nil {
+			return nil
+		}
+		return w.WriteHeader(ev.status, ev.headers)
+	case ev.end:
+		if w == nil {
+			return nil
+		}
+		return w.Flush()
+	default:
+		if w == nil {
+			st.stream.appendBody(ev.data)
+			return nil
+		}
+		if err := w.Write(ev.data); err != nil {
+			return err
+		}
+		return w.Flush()
 	}
 }
 
@@ -730,6 +853,7 @@ func (v *VM) err() error {
 type response struct {
 	mu       sync.Mutex
 	called   bool
+	streamed bool
 	finished bool
 	status   int
 	headers  map[string]string
@@ -778,10 +902,30 @@ func (r *response) finish() *Response {
 		return nil
 	}
 	return &Response{
-		Status:  r.status,
-		Headers: r.headers,
-		Body:    r.body,
+		Status:   r.status,
+		Headers:  r.headers,
+		Body:     r.body,
+		Streamed: r.streamed,
 	}
+}
+
+func (r *response) stream(status int, headers map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finished {
+		return errors.New("javascript: response already finished")
+	}
+	if r.called {
+		return errors.New("javascript: response already sent")
+	}
+	if status < 100 || status > 999 {
+		return fmt.Errorf("javascript: invalid status %d", status)
+	}
+	r.called = true
+	r.streamed = true
+	r.status = status
+	r.headers = headers
+	return nil
 }
 
 func (r *response) responded() bool {

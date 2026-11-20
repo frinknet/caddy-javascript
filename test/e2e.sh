@@ -128,6 +128,10 @@ http://budget.example:80 {
 	javascript /app/budget.js
 }
 
+http://stream.example:80 {
+	javascript /app/stream.js
+}
+
 CADDY
 
 echo ""
@@ -482,6 +486,35 @@ JS
 wait_check "a repaired module reloads again" / --host watch.example --equals 'watch:v3'
 
 check "a request over the callback budget fails" GET / --host budget.example --status 500
+
+echo ""
+echo "=== Test 1d: streaming, SSE, and websocket ==="
+check "stream writes chunks" GET /stream/sync --host stream.example --status 200 --equals 'a|b|c' --rheader "content-type: text/plain"
+check "stream continues after the dispatch" GET /stream/async --host stream.example --status 200 --equals 'first|second'
+sse_want=$(printf 'data: one\n\nevent: tick\nid: 1\ndata: two')
+check "sse formats events" GET /stream/sse --host stream.example --status 200 --equals "$sse_want" --rheader "content-type: text/event-stream"
+
+ws_body="$REQ/ws-body"
+ws_headers="$REQ/ws-headers"
+curl -sS --max-time 3 -o "$ws_body" -D "$ws_headers" \
+	-H "Host: stream.example" \
+	-H "Connection: Upgrade" \
+	-H "Upgrade: websocket" \
+	-H "Sec-WebSocket-Version: 13" \
+	-H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+	"$BASE/stream/ws" >/dev/null 2>"$REQ/curl-err" || true
+ws_hex=$(od -An -v -tx1 "$ws_body" 2>/dev/null | tr -d ' \n')
+if grep -q "101 Switching Protocols" "$ws_headers" \
+	&& grep -qi "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" "$ws_headers" \
+	&& [ "$ws_hex" = "810568656c6c6f880203e8" ]; then
+	echo "  PASS: websocket upgrades and frames a message"
+	PASS=$((PASS + 1))
+else
+	echo "  FAIL: websocket handshake or frame mismatch"
+	echo "    headers: $(tr -d '\r' < "$ws_headers" 2>/dev/null | tr '\n' ' ')"
+	echo "    body hex: $ws_hex"
+	FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "=== Test 2: configuration validation ==="
