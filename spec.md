@@ -444,7 +444,8 @@ The configuration surface, one go-quickjs VM per site, ESM
 evaluation with a sandboxed loader, a per-request `http` (request facts,
 `headers`, a 1 MiB `body`, `cookies`, `query`, a live `vars` proxy, `rewrite`,
 and `respond`), `route()` layers, timeouts, memory limits, queue
-admission, VM reuse across reloads when the VM options are unchanged, and the
+admission, VM reuse across reloads when the VM options are unchanged, the
 global worker's mutable `config` object with `config.apply()` and
-`config.caddyfile()` are implemented. Workers and messages, `_`, events, fetch,
-`fs`, `env_allow`, and watching remain.
+`config.caddyfile()`, the `_` template registry, `fs`, allowlisted `fetch`,
+`env_allow`, `structuredClone`, messaging, and workers are implemented.
+Caddy events and watching remain.

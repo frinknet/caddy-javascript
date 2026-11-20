@@ -126,6 +126,21 @@ implemented yet.
 - Entry evaluation has a provision deadline. A syntax error, a rejected
   top-level await, or a runaway module fails the configuration load, so the
   previous generation keeps serving.
+- `fs` is available as the `fs` module. The sandbox root is `/` to the script;
+  `..` and symlinks that leave the root are refused, and writes stay inside it.
+- `fetch` is installed only when `fetch_allow` is non-empty. Every request,
+  including each redirect, is checked against the allowlist; response bodies
+  are capped at 1 MiB. `_.httpInclude` and `_.getHostByName` use the same list.
+- `structuredClone`, `MessageChannel`, `MessagePort`, and `BroadcastChannel`
+  are installed. Broadcast names are scoped to the VM, so an old and a new
+  generation never exchange messages, and a script still reads the name it
+  chose. A port keeps the loop alive until it is closed or `unref`d.
+- `Worker` starts a runtime on its own goroutine with the same root,
+  capabilities, and module loader. A worker specifier resolves against the
+  entry module inside the sandbox; a bare specifier or one that leaves the root
+  is refused. At most 8 workers run at once, and closing the VM terminates
+  them.
+- `process`, `require`, `run`, `serve`, `sockets`, and DNS are not installed.
 
 A global worker can add a route and reload Caddy without losing its own
 state:
@@ -178,7 +193,7 @@ Options are available on both the global option and the directive:
 | `memory <bytes>` | Per-VM memory limit. | `64MiB` |
 | `queue_size <n>` | Per-VM admission queue. | `256` |
 | `env_allow <names...>` | Environment names visible to `_`. | empty |
-| `fetch_allow <hosts...>` | Outbound hosts for `_.httpInclude` and `_.getHostByName`. | empty |
+| `fetch_allow <hosts...>` | Outbound hosts for `fetch`, `_.httpInclude`, and `_.getHostByName`. | empty |
 | `watch [true\|false]` | Reload on module-tree changes. Parsed, not active yet. | `true` |
 
 ```caddyfile
@@ -208,10 +223,12 @@ export default function handler(http) {
 }
 ```
 
-Timers are installed. Handlers and route layers must finish synchronously: a
-promise returned by a handler is not awaited, and a script that responds after
-the dispatch has returned gets an error. `fetch`, `fs`, workers,
-`MessageChannel`, and Caddy events are not available yet.
+Timers, promises, `fs`, `fetch` (with `fetch_allow`), workers, `MessageChannel`,
+`BroadcastChannel`, and `structuredClone` are installed. Handlers and route
+layers must finish synchronously: a promise returned by a handler is not
+awaited, and a script that responds after the dispatch has returned gets an
+error. Start asynchronous work from module scope, a timer, or a worker, and
+read its result on a later request. Caddy events are not available yet.
 
 ## JSON configuration
 

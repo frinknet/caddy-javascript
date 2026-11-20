@@ -78,6 +78,17 @@ http://allow.example:80 {
 			fetch_allow 127.0.0.1
 		}
 	}
+	handle /caps/* {
+		javascript /app/caps-allow.js {
+			fetch_allow 127.0.0.1
+		}
+	}
+}
+
+http://caps.example:80 {
+	handle /caps/* {
+		javascript /app/caps.js
+	}
 }
 
 http://vars.example:80 {
@@ -251,6 +262,51 @@ check() {
 	fi
 }
 
+# wait_check NAME PATH [--host NAME] --equals BODY
+# Retries until the body matches exactly, for work that settles on the loop.
+wait_check() {
+	wait_name=$1
+	wait_path=$2
+	shift 2
+	wait_equals=
+	wait_host=
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--equals)
+			wait_equals=$2
+			shift 2
+			;;
+		--host)
+			wait_host=$2
+			shift 2
+			;;
+		*)
+			echo "wait_check: unknown option $1" >&2
+			exit 2
+			;;
+		esac
+	done
+
+	i=0
+	while [ "$i" -lt 50 ]; do
+		if [ -n "$wait_host" ]; then
+			curl -sS -o "$REQ/body" --max-time 5 -H "Host: $wait_host" "$BASE$wait_path" 2>"$REQ/curl-err"
+		else
+			curl -sS -o "$REQ/body" --max-time 5 "$BASE$wait_path" 2>"$REQ/curl-err"
+		fi
+		if [ "$(cat "$REQ/body")" = "$wait_equals" ]; then
+			echo "  PASS: $wait_name"
+			PASS=$((PASS + 1))
+			return
+		fi
+		i=$((i + 1))
+		sleep 0.1
+	done
+	echo "    body $(cat "$REQ/body"), want $wait_equals"
+	echo "  FAIL: $wait_name"
+	FAIL=$((FAIL + 1))
+}
+
 echo ""
 echo "=== Test 1: site runtime ==="
 check "site handler runs the entry module" GET / --status 200 --equals 'GET /'
@@ -293,6 +349,15 @@ check "bare globals and http.vars stay separate" GET /vars/page.html --host vars
 
 check "a javascript directive that responds stops the chain" GET "/chain?token=no" --host chain.example --status 401 --equals 'unauthorized'
 check "an unanswered javascript directive continues to the next one" GET "/chain?token=secret" --host chain.example --status 200 --equals 'token=secret'
+
+echo ""
+echo "=== Test 1a: capabilities ==="
+check "fs reads the sandbox root" GET /caps/fs --host caps.example --status 200 --equals "$(cat test/app/lib.js)"
+check "structuredClone copies plain data" GET /caps/clone --host caps.example --status 200 --equals '{"a":[1,2],"b":"x"}'
+check "fetch is absent without fetch_allow" GET /caps/fetch --host caps.example --status 200 --equals 'undefined'
+wait_check "a worker posts to its parent" /caps/worker --host caps.example --equals 'worker:ok'
+wait_check "a BroadcastChannel reaches the same VM" /caps/channel --host caps.example --equals 'channel:ok'
+wait_check "fetch reaches an allowed host" /caps/fetch --host allow.example --equals 'GET /anything'
 
 echo ""
 echo "=== Test 1b: worker config ==="

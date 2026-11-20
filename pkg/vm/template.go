@@ -39,7 +39,11 @@ func (v *VM) RootDir() string {
 
 // FetchAllowed reports whether a host is allowed by fetch_allow.
 func (v *VM) FetchAllowed(host string) bool {
-	for _, pattern := range v.fetchAllow {
+	return fetchAllowed(v.fetchAllow, host)
+}
+
+func fetchAllowed(patterns []string, host string) bool {
+	for _, pattern := range patterns {
 		if pattern == "*" || pattern == host {
 			return true
 		}

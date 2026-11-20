@@ -91,8 +91,13 @@ func releaseSite(key string) error {
 func sitePoolKey(site siteRef, cfg vm.Config) string {
 	listen := append([]string(nil), site.srv.Listen...)
 	sort.Strings(listen)
-	return fmt.Sprintf("%s|%s|%s|%d|%d",
-		strings.Join(listen, ","), site.identity, cfg.RootDir, cfg.Memory, cfg.QueueSize)
+	allow := append([]string(nil), cfg.FetchAllow...)
+	sort.Strings(allow)
+	env := append([]string(nil), cfg.EnvAllow...)
+	sort.Strings(env)
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s",
+		strings.Join(listen, ","), site.identity, cfg.RootDir, cfg.Memory, cfg.QueueSize,
+		strings.Join(allow, ","), strings.Join(env, ","))
 }
 
 // acquireApp joins the pool for the global worker VM.
@@ -107,5 +112,8 @@ func releaseApp(key string) error {
 }
 
 func appPoolKey(cfg vm.Config) string {
-	return fmt.Sprintf("app|%s|%s|%d|%d", cfg.ScriptPath, cfg.RootDir, cfg.Memory, cfg.QueueSize)
+	allow := append([]string(nil), cfg.FetchAllow...)
+	sort.Strings(allow)
+	return fmt.Sprintf("app|%s|%s|%d|%d|%s",
+		cfg.ScriptPath, cfg.RootDir, cfg.Memory, cfg.QueueSize, strings.Join(allow, ","))
 }

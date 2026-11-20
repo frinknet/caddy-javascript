@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
@@ -23,8 +24,14 @@ import (
 const (
 	DefaultMemory           = int64(64 << 20)
 	DefaultQueueSize        = 256
+	DefaultMaxWorkers       = 8
+	DefaultFetchBodyLimit   = int64(1 << 20)
 	DefaultProvisionTimeout = 10 * time.Second
 )
+
+// vmSeq gives every VM a token for names that are process-wide, such as
+// BroadcastChannel, so two VMs never hear each other.
+var vmSeq atomic.Uint64
 
 var (
 	ErrQueueFull = errors.New("javascript: vm queue full")
@@ -147,22 +154,7 @@ func New(cfg Config) (*VM, error) {
 		return nil, err
 	}
 
-	rt := quickjs.New(
-		quickjs.WithMemoryLimit(cfg.Memory),
-		quickjs.WithStackSize(1<<16),
-		quickjs.WithMaxCallDepth(1000),
-		quickjs.WithLocale("en-US"),
-	)
-	rt.SetTimeZone(time.UTC)
-
-	loop := stdlib.NewLoop(rt)
-	if err := stdlib.Install(rt, stdlib.Config{Loop: loop, NoWebAPIs: true}); err != nil {
-		rt.Close()
-		root.Close()
-		return nil, fmt.Errorf("javascript: install runtime: %w", err)
-	}
-
-	rt.SetModuleLoader(func(specifier, referrer string) (string, string, error) {
+	loader := func(specifier, referrer string) (string, string, error) {
 		name, err := sb.resolve(specifier, referrer)
 		if err != nil {
 			return "", "", err
@@ -172,7 +164,75 @@ func New(cfg Config) (*VM, error) {
 			return "", "", err
 		}
 		return string(src), name, nil
-	})
+	}
+
+	newRuntime := func() (*quickjs.Runtime, error) {
+		worker := quickjs.New(
+			quickjs.WithMemoryLimit(cfg.Memory),
+			quickjs.WithStackSize(1<<16),
+			quickjs.WithMaxCallDepth(1000),
+			quickjs.WithLocale("en-US"),
+		)
+		worker.SetTimeZone(time.UTC)
+		worker.SetModuleLoader(loader)
+		return worker, nil
+	}
+
+	scope := fmt.Sprintf("caddy-js-%d:", vmSeq.Add(1))
+	scoped := func(rt *quickjs.Runtime) error {
+		return installChannelScope(rt, scope)
+	}
+
+	rt, err := newRuntime()
+	if err != nil {
+		root.Close()
+		return nil, fmt.Errorf("javascript: create runtime: %w", err)
+	}
+
+	loop := stdlib.NewLoop(rt)
+	lib := stdlib.Config{
+		Loop: loop,
+		FS:   &stdlib.FS{Root: dir},
+		Workers: &stdlib.Workers{
+			Max:       DefaultMaxWorkers,
+			New:       newRuntime,
+			Installed: scoped,
+			Load: func(specifier string) (string, string, bool, error) {
+				name, err := sb.resolve(specifier, entryName)
+				if err != nil {
+					return "", "", false, err
+				}
+				src, err := sb.read(name)
+				if err != nil {
+					return "", "", false, err
+				}
+				return string(src), name, true, nil
+			},
+		},
+	}
+	if len(cfg.FetchAllow) > 0 {
+		allow := append([]string(nil), cfg.FetchAllow...)
+		lib.Fetch = &stdlib.Fetch{
+			Allow: func(req *http.Request) error {
+				host := req.URL.Hostname()
+				if !fetchAllowed(allow, host) {
+					return fmt.Errorf("javascript: fetch to %q is not allowed", host)
+				}
+				return nil
+			},
+			MaxBodyBytes: DefaultFetchBodyLimit,
+		}
+	}
+	if err := stdlib.Install(rt, lib); err != nil {
+		rt.Close()
+		root.Close()
+		return nil, fmt.Errorf("javascript: install runtime: %w", err)
+	}
+	if err := scoped(rt); err != nil {
+		rt.Close()
+		root.Close()
+		return nil, fmt.Errorf("javascript: install messaging: %w", err)
+	}
 
 	provisionTimeout := cfg.ProvisionTimeout
 	if provisionTimeout <= 0 {
