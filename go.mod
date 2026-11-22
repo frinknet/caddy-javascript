@@ -1,4 +1,4 @@
-module github.com/frinknet/caddy-javascript/v2
+module github.com/frinknet/caddy-javascript
 
 go 1.26.0
 
